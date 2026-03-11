@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "claudeface": {
+      "command": "bash",
+      "args": ["-c", "source .venv/bin/activate && python src/mcp_server.py"],
+      "cwd": "."
+    }
+  }
+}

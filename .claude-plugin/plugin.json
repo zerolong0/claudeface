@@ -1,0 +1,8 @@
+{
+  "name": "claudeface",
+  "version": "0.1.0",
+  "description": "Emotion-aware Claude Code plugin — captures facial expressions via MacBook camera and injects emotional context into conversations.",
+  "author": "zerolong",
+  "hooks": "hooks/hooks.json",
+  "mcp": ".mcp.json"
+}

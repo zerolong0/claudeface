@@ -1,0 +1,168 @@
+{
+  "project": "ClaudeFace",
+  "createdAt": "2026-03-11",
+  "updatedAt": "2026-03-12",
+  "description": "Claude Code plugin that captures user facial expressions via MacBook camera, detects emotions, and injects emotional context into conversations for empathetic interaction.",
+  "features": [
+    {
+      "id": "F1",
+      "name": "Plugin Scaffold & Project Setup",
+      "category": "infrastructure",
+      "description": "Create the Claude Code plugin structure with manifest, hooks config, MCP server config, and Python virtual environment with dependencies (opencv-python, fer, Pillow).",
+      "steps": [
+        "Step 1: Create .claude-plugin/plugin.json manifest",
+        "Step 2: Create hooks/hooks.json with SessionStart and UserPromptSubmit hooks",
+        "Step 3: Create .mcp.json for MCP server registration",
+        "Step 4: Create requirements.txt (opencv-python-headless, fer, Pillow, numpy)",
+        "Step 5: Create setup.sh installer script (venv creation, pip install, permission check)",
+        "Step 6: Create package.json for Node.js MCP server dependencies"
+      ],
+      "successCriteria": "Plugin directory structure complete, setup.sh runs successfully, venv created with all deps installed.",
+      "dependencies": [],
+      "techDocs": ["claude-code-plugins", "python-venv"],
+      "status": "complete",
+      "agent": "",
+      "notes": ""
+    },
+    {
+      "id": "F2",
+      "name": "Camera Capture Module",
+      "category": "functional",
+      "description": "Python module that captures frames from MacBook camera using OpenCV. Supports single-shot capture and periodic background capture. Handles camera permission gracefully.",
+      "steps": [
+        "Step 1: Create src/camera.py with CameraCapture class",
+        "Step 2: Implement capture_frame() - single shot capture returning numpy array",
+        "Step 3: Implement start_background_capture(interval_sec) - periodic capture to shared state",
+        "Step 4: Implement get_latest_frame() - retrieve most recent captured frame",
+        "Step 5: Add camera permission detection and user-friendly error messages",
+        "Step 6: Add graceful cleanup on process exit (release camera resource)"
+      ],
+      "successCriteria": "Can capture a frame from MacBook camera, save as JPEG, handle no-camera and permission-denied errors gracefully.",
+      "dependencies": ["F1"],
+      "techDocs": ["opencv-python", "AVFoundation"],
+      "status": "complete",
+      "agent": "",
+      "notes": ""
+    },
+    {
+      "id": "F3",
+      "name": "Emotion Detection Module",
+      "category": "functional",
+      "description": "Python module that analyzes camera frames to detect facial emotions using the FER library. Returns structured emotion data (emotion label, confidence scores, face bounding box).",
+      "steps": [
+        "Step 1: Create src/emotion.py with EmotionDetector class",
+        "Step 2: Implement detect(frame) - returns list of {emotion, confidence, bbox} dicts",
+        "Step 3: Implement get_dominant_emotion() - returns highest-confidence emotion label",
+        "Step 4: Implement get_emotion_summary() - human-readable summary string",
+        "Step 5: Add emotion history tracking (last N detections for trend analysis)",
+        "Step 6: Implement get_emotion_trend() - rising/falling/stable for each emotion"
+      ],
+      "successCriteria": "Given a camera frame with a face, correctly identifies dominant emotion from 7 categories (angry, disgust, fear, happy, sad, surprise, neutral) with >60% accuracy on clear faces.",
+      "dependencies": ["F1"],
+      "techDocs": ["fer-library", "opencv-python"],
+      "status": "complete",
+      "agent": "",
+      "notes": "FER uses FER2013 dataset, 7 emotions. Library handles face detection internally."
+    },
+    {
+      "id": "F4",
+      "name": "Terminal Portrait Renderer",
+      "category": "ui",
+      "description": "Renders user portrait in terminal. Auto-detects terminal capabilities: uses iTerm2 inline image protocol for iTerm2/WezTerm, falls back to ASCII art for other terminals.",
+      "steps": [
+        "Step 1: Create src/renderer.py with TerminalRenderer class",
+        "Step 2: Implement detect_terminal_protocol() - check TERM_PROGRAM for iTerm2/WezTerm/Kitty",
+        "Step 3: Implement render_iterm2(image_bytes) - base64 encode + ESC sequence",
+        "Step 4: Implement render_ascii(frame) - convert to ASCII art using brightness mapping",
+        "Step 5: Implement render_portrait(frame, emotion_label) - composite render with emotion badge",
+        "Step 6: Add color support for ASCII art (ANSI 256 colors)"
+      ],
+      "successCriteria": "Portrait renders correctly in iTerm2 (inline image) and standard Terminal.app (ASCII art). Emotion label displayed below portrait.",
+      "dependencies": ["F1"],
+      "techDocs": ["iterm2-inline-images", "ansi-escape-codes"],
+      "status": "complete",
+      "agent": "",
+      "notes": "iTerm2 protocol: ESC ] 1337 ; File=[args] : base64-data BEL"
+    },
+    {
+      "id": "F5",
+      "name": "Background Daemon Process",
+      "category": "functional",
+      "description": "Python daemon that runs in background, periodically captures camera frames, detects emotions, and writes current state to a JSON file that MCP server and hooks can read.",
+      "steps": [
+        "Step 1: Create src/daemon.py - main entry point for background process",
+        "Step 2: Implement capture-detect loop (configurable interval, default 10s)",
+        "Step 3: Write state to ~/.claudeface/state.json (emotion, confidence, timestamp, trend)",
+        "Step 4: Implement PID file management (~/.claudeface/daemon.pid) for lifecycle control",
+        "Step 5: Add start/stop/status CLI commands",
+        "Step 6: Add automatic shutdown after configurable idle timeout (default 2 hours)"
+      ],
+      "successCriteria": "Daemon starts in background, updates state.json every 10s with current emotion data, stops cleanly on signal. PID file allows hooks to check if daemon is running.",
+      "dependencies": ["F2", "F3"],
+      "techDocs": ["python-daemon", "signal-handling"],
+      "status": "complete",
+      "agent": "",
+      "notes": "State file approach is simpler and more reliable than socket IPC for hook integration."
+    },
+    {
+      "id": "F6",
+      "name": "MCP Server",
+      "category": "functional",
+      "description": "MCP server that exposes tools for Claude to query user emotional state. Reads from daemon's state.json. Tools: get_user_mood, get_user_portrait, get_interaction_suggestion.",
+      "steps": [
+        "Step 1: Create src/mcp_server.py using Python MCP SDK (mcp library)",
+        "Step 2: Implement get_user_mood tool - returns current emotion + confidence + trend",
+        "Step 3: Implement get_user_portrait tool - captures fresh frame, returns base64 image",
+        "Step 4: Implement get_interaction_suggestion tool - returns context-aware interaction advice",
+        "Step 5: Add health check / daemon status reporting",
+        "Step 6: Register in .mcp.json with stdio transport"
+      ],
+      "successCriteria": "MCP server starts via stdio, Claude Code can call get_user_mood and receive valid JSON with emotion data. get_interaction_suggestion returns appropriate advice based on detected emotion.",
+      "dependencies": ["F5"],
+      "techDocs": ["mcp-python-sdk", "claude-code-mcp"],
+      "status": "complete",
+      "agent": "",
+      "notes": "Using Python MCP SDK (pip install mcp) for simplicity - single language stack."
+    },
+    {
+      "id": "F7",
+      "name": "Hooks Integration",
+      "category": "functional",
+      "description": "Claude Code hooks that: (1) on SessionStart, launch daemon + capture portrait + render in terminal, (2) on UserPromptSubmit, read emotion state and inject as context.",
+      "steps": [
+        "Step 1: Create hooks/session_start.sh - starts daemon if not running, captures portrait, renders in terminal",
+        "Step 2: Create hooks/user_prompt.sh - reads state.json, outputs emotion context as JSON",
+        "Step 3: Configure hooks.json with SessionStart hook (matcher: startup)",
+        "Step 4: Configure hooks.json with UserPromptSubmit hook",
+        "Step 5: Implement emotion-to-context mapping (emotion → system message advice)",
+        "Step 6: Add first-run experience: camera permission prompt + welcome portrait"
+      ],
+      "successCriteria": "Starting Claude Code in plugin directory shows user portrait in terminal. Each user message automatically injects current emotion context. Claude adjusts tone based on detected emotion.",
+      "dependencies": ["F4", "F5"],
+      "techDocs": ["claude-code-hooks"],
+      "status": "complete",
+      "agent": "",
+      "notes": "Hook output goes to Claude as additionalContext via stdout JSON."
+    },
+    {
+      "id": "F8",
+      "name": "Interaction Strategy Engine",
+      "category": "functional",
+      "description": "Logic that maps detected emotions to interaction strategies. Generates context prompts that guide Claude's response tone and behavior.",
+      "steps": [
+        "Step 1: Create src/strategy.py with InteractionStrategy class",
+        "Step 2: Define emotion-to-strategy mapping rules",
+        "Step 3: Implement positive mood strategy (maintain energy, celebrate progress)",
+        "Step 4: Implement negative mood strategy (encouragement, offer breaks, simplify explanations)",
+        "Step 5: Implement fatigue detection (drowsy pattern: neutral+low confidence over time → suggest rest)",
+        "Step 6: Implement strategy prompt generation (returns natural language context for Claude)"
+      ],
+      "successCriteria": "Given emotion=happy returns positive interaction prompt. Given emotion=sad returns supportive prompt. Given drowsy pattern returns rest suggestion. All prompts are natural and non-intrusive.",
+      "dependencies": ["F3"],
+      "techDocs": [],
+      "status": "complete",
+      "agent": "",
+      "notes": "Strategies should be subtle, not patronizing. Key patterns: happy→positive, sad→supportive, angry→calm, surprise→curious, neutral→normal, fatigue(trend)→rest suggestion."
+    }
+  ]
+}

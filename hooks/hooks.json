@@ -1,0 +1,16 @@
+{
+  "hooks": [
+    {
+      "matcher": "",
+      "event": "SessionStart",
+      "command": "bash hooks/session_start.sh",
+      "timeout": 15000
+    },
+    {
+      "matcher": "",
+      "event": "UserPromptSubmit",
+      "command": "bash hooks/user_prompt.sh",
+      "timeout": 5000
+    }
+  ]
+}
