@@ -1,37 +1,51 @@
-/// ClaudeFace Vision - Native macOS face landmark detection.
+/// ClaudeFace Vision - Native macOS face landmark detection + ASCII portrait.
 ///
 /// Captures a single frame from the built-in camera via AVFoundation,
 /// runs VNDetectFaceLandmarksRequest (Vision framework), and outputs
 /// normalized landmark coordinates as JSON to stdout.
 ///
 /// Build:  swiftc -O -o bin/claudeface-vision src/claudeface_vision.swift \
-///             -framework AVFoundation -framework Vision -framework CoreMedia
+///             -framework AVFoundation -framework Vision -framework CoreMedia \
+///             -framework CoreGraphics -framework CoreImage
 ///
 /// Usage:  bin/claudeface-vision          → single detect, JSON to stdout
+///         bin/claudeface-vision --ascii   → ASCII portrait to stdout
+///         bin/claudeface-vision --ascii W H  → custom size (default 80x35)
 ///         bin/claudeface-vision --check   → permission/camera check only
 
 import AVFoundation
+import CoreGraphics
+import CoreImage
 import CoreMedia
 import Foundation
 import Vision
 
-// MARK: - Single-Frame Capture + Face Landmark Detection
+// MARK: - ASCII Art Character Ramp
 
-final class FaceLandmarkDetector: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+let ASCII_RAMP = " .,:;i1tfLCG08@"
+
+// MARK: - Frame Capturer (shared by detect + ascii modes)
+
+final class FrameCapturer: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let session = AVCaptureSession()
     private let semaphore = DispatchSemaphore(value: 0)
     private var frameCount = 0
-    private let warmupFrames = 10 // skip first N frames (camera auto-exposure warmup)
-    private var capturedResult: [String: Any]?
+    private let warmupFrames = 10
+    private var pixelBufferResult: CVPixelBuffer?
+    private var useHighRes: Bool
 
-    /// Run one capture cycle: open camera → skip warmup → detect landmarks → return JSON-ready dict.
-    func detect() -> [String: Any] {
-        // Camera authorization
+    init(highRes: Bool = true) {
+        self.useHighRes = highRes
+        super.init()
+    }
+
+    /// Capture a single frame and return the raw pixel buffer.
+    func captureFrame() -> CVPixelBuffer? {
         let authStatus = AVCaptureDevice.authorizationStatus(for: .video)
         switch authStatus {
         case .denied, .restricted:
-            return ["status": "no_permission",
-                    "message": "Camera access denied. Grant permission in System Settings > Privacy & Security > Camera."]
+            fputs("[error] Camera access denied.\n", stderr)
+            return nil
         case .notDetermined:
             let sem = DispatchSemaphore(value: 0)
             var granted = false
@@ -40,23 +54,19 @@ final class FaceLandmarkDetector: NSObject, AVCaptureVideoDataOutputSampleBuffer
                 sem.signal()
             }
             sem.wait()
-            if !granted {
-                return ["status": "no_permission",
-                        "message": "Camera access was not granted."]
-            }
+            if !granted { return nil }
         default:
             break
         }
 
-        // Open camera
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device)
         else {
-            return ["status": "no_camera",
-                    "message": "No camera device found."]
+            fputs("[error] No camera device found.\n", stderr)
+            return nil
         }
 
-        session.sessionPreset = .high // use highest available resolution for reliable detection
+        session.sessionPreset = useHighRes ? .high : .medium
         session.addInput(input)
 
         let output = AVCaptureVideoDataOutput()
@@ -68,20 +78,16 @@ final class FaceLandmarkDetector: NSObject, AVCaptureVideoDataOutputSampleBuffer
         session.addOutput(output)
 
         session.startRunning()
-
-        // Wait up to 8 seconds for a result
         let timeout = semaphore.wait(timeout: .now() + 8)
         session.stopRunning()
 
         if timeout == .timedOut {
-            return ["status": "timeout",
-                    "message": "Camera capture timed out after 8 seconds."]
+            fputs("[error] Camera capture timed out.\n", stderr)
+            return nil
         }
 
-        return capturedResult ?? ["status": "error", "message": "Unknown error"]
+        return pixelBufferResult
     }
-
-    // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
 
     func captureOutput(
         _ output: AVCaptureOutput,
@@ -91,77 +97,121 @@ final class FaceLandmarkDetector: NSObject, AVCaptureVideoDataOutputSampleBuffer
         frameCount += 1
         guard frameCount > warmupFrames else { return }
 
-        // Stop receiving further frames
         if let videoOutput = output as? AVCaptureVideoDataOutput {
             videoOutput.setSampleBufferDelegate(nil, queue: nil)
         }
 
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            capturedResult = ["status": "error", "message": "Failed to get pixel buffer"]
-            semaphore.signal()
-            return
-        }
-
-        // Run Vision face landmark detection
-        let request = VNDetectFaceLandmarksRequest()
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-
-        do {
-            try handler.perform([request])
-        } catch {
-            capturedResult = ["status": "error", "message": error.localizedDescription]
-            semaphore.signal()
-            return
-        }
-
-        guard let observations = request.results, !observations.isEmpty else {
-            capturedResult = ["status": "no_face"]
-            semaphore.signal()
-            return
-        }
-
-        // Use the first (largest/most prominent) face
-        let face = observations[0]
-        var data: [String: Any] = ["status": "ok"]
-
-        // Bounding box (normalized to full image)
-        let box = face.boundingBox
-        data["bbox"] = [
-            round(Double(box.origin.x) * 10000) / 10000,
-            round(Double(box.origin.y) * 10000) / 10000,
-            round(Double(box.width) * 10000) / 10000,
-            round(Double(box.height) * 10000) / 10000,
-        ]
-
-        // Extract key landmark regions
-        if let lm = face.landmarks {
-            var landmarks: [String: [[Double]]] = [:]
-
-            func extract(_ name: String, _ region: VNFaceLandmarkRegion2D?) {
-                guard let r = region else { return }
-                landmarks[name] = r.normalizedPoints.map { pt in
-                    [round(Double(pt.x) * 10000) / 10000,
-                     round(Double(pt.y) * 10000) / 10000]
-                }
-            }
-
-            extract("leftEye", lm.leftEye)
-            extract("rightEye", lm.rightEye)
-            extract("leftEyebrow", lm.leftEyebrow)
-            extract("rightEyebrow", lm.rightEyebrow)
-            extract("outerLips", lm.outerLips)
-            extract("innerLips", lm.innerLips)
-            extract("nose", lm.nose)
-
-            data["landmarks"] = landmarks
-        }
-
-        capturedResult = data
+        pixelBufferResult = CMSampleBufferGetImageBuffer(sampleBuffer)
         semaphore.signal()
     }
 }
 
-// MARK: - Permission Check Mode
+// MARK: - Face Landmark Detection
+
+func detectLandmarks(from pixelBuffer: CVPixelBuffer) -> [String: Any] {
+    let request = VNDetectFaceLandmarksRequest()
+    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+
+    do {
+        try handler.perform([request])
+    } catch {
+        return ["status": "error", "message": error.localizedDescription]
+    }
+
+    guard let observations = request.results, !observations.isEmpty else {
+        return ["status": "no_face"]
+    }
+
+    let face = observations[0]
+    var data: [String: Any] = ["status": "ok"]
+
+    let box = face.boundingBox
+    data["bbox"] = [
+        round(Double(box.origin.x) * 10000) / 10000,
+        round(Double(box.origin.y) * 10000) / 10000,
+        round(Double(box.width) * 10000) / 10000,
+        round(Double(box.height) * 10000) / 10000,
+    ]
+
+    if let lm = face.landmarks {
+        var landmarks: [String: [[Double]]] = [:]
+
+        func extract(_ name: String, _ region: VNFaceLandmarkRegion2D?) {
+            guard let r = region else { return }
+            landmarks[name] = r.normalizedPoints.map { pt in
+                [round(Double(pt.x) * 10000) / 10000,
+                 round(Double(pt.y) * 10000) / 10000]
+            }
+        }
+
+        extract("leftEye", lm.leftEye)
+        extract("rightEye", lm.rightEye)
+        extract("leftEyebrow", lm.leftEyebrow)
+        extract("rightEyebrow", lm.rightEyebrow)
+        extract("outerLips", lm.outerLips)
+        extract("innerLips", lm.innerLips)
+        extract("nose", lm.nose)
+
+        data["landmarks"] = landmarks
+    }
+
+    return data
+}
+
+// MARK: - ASCII Portrait Rendering
+
+func renderASCII(pixelBuffer: CVPixelBuffer, width: Int = 80, height: Int = 35) {
+    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+    let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+    let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+    guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+        fputs("[error] Cannot access pixel buffer.\n", stderr)
+        return
+    }
+
+    let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+    let rampCount = ASCII_RAMP.count
+
+    // Terminal characters are ~2x taller than wide, so we sample accordingly
+    let scaleX = Double(imgWidth) / Double(width)
+    let scaleY = Double(imgHeight) / Double(height)
+
+    var lines: [String] = []
+
+    for row in 0..<height {
+        var lineChars: [Character] = []
+        // Sample from image (top-to-bottom, but camera image is not flipped)
+        let srcY = Int(Double(row) * scaleY)
+        let clampedY = min(srcY, imgHeight - 1)
+
+        for col in 0..<width {
+            // Mirror horizontally so it looks like a mirror
+            let srcX = imgWidth - 1 - Int(Double(col) * scaleX)
+            let clampedX = max(0, min(srcX, imgWidth - 1))
+
+            let offset = clampedY * bytesPerRow + clampedX * 4
+            // BGRA format
+            let b = Double(buffer[offset])
+            let g = Double(buffer[offset + 1])
+            let r = Double(buffer[offset + 2])
+
+            // Luminance
+            let luma = 0.299 * r + 0.587 * g + 0.114 * b
+            let idx = min(Int(luma / 256.0 * Double(rampCount)), rampCount - 1)
+            let char = ASCII_RAMP[ASCII_RAMP.index(ASCII_RAMP.startIndex, offsetBy: idx)]
+            lineChars.append(char)
+        }
+        lines.append(String(lineChars))
+    }
+
+    print(lines.joined(separator: "\n"))
+}
+
+// MARK: - Permission Check
 
 func checkOnly() -> [String: Any] {
     let auth = AVCaptureDevice.authorizationStatus(for: .video)
@@ -197,10 +247,29 @@ func printJSON(_ dict: [String: Any]) {
 // MARK: - Main
 
 let args = CommandLine.arguments
+
 if args.count > 1 && args[1] == "--check" {
     printJSON(checkOnly())
+} else if args.count > 1 && args[1] == "--ascii" {
+    // Parse optional width/height: --ascii [W] [H]
+    let w = args.count > 2 ? Int(args[2]) ?? 80 : 80
+    let h = args.count > 3 ? Int(args[3]) ?? 35 : 35
+
+    let capturer = FrameCapturer(highRes: false) // medium res is enough for ASCII
+    if let pb = capturer.captureFrame() {
+        renderASCII(pixelBuffer: pb, width: w, height: h)
+        _ = pb // ARC managed
+    } else {
+        fputs("[error] Failed to capture frame.\n", stderr)
+    }
 } else {
-    let detector = FaceLandmarkDetector()
-    let result = detector.detect()
-    printJSON(result)
+    // Default: face landmark detection (JSON output)
+    let capturer = FrameCapturer(highRes: true)
+    if let pb = capturer.captureFrame() {
+        let result = detectLandmarks(from: pb)
+        printJSON(result)
+        _ = pb // ARC managed
+    } else {
+        printJSON(["status": "no_camera", "message": "Failed to capture frame."])
+    }
 }

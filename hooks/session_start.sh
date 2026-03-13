@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ClaudeFace SessionStart Hook
-# Starts the daemon if not running, reports initial emotion state.
+# Renders ASCII portrait + emotion, then starts the daemon.
 
 set -euo pipefail
 
@@ -12,19 +12,47 @@ PID_FILE="$STATE_DIR/daemon.pid"
 PYTHON="$VENV/bin/python"
 VISION_BINARY="$PLUGIN_DIR/bin/claudeface-vision"
 
-# Ensure venv exists
+# Ensure prerequisites
 if [ ! -f "$PYTHON" ]; then
   echo "[ClaudeFace] Virtual environment not found. Run setup.sh first." >&2
   exit 0
 fi
-
-# Ensure vision binary exists
 if [ ! -f "$VISION_BINARY" ]; then
   echo "[ClaudeFace] Vision binary not found. Run setup.sh to compile." >&2
   exit 0
 fi
 
-# Start daemon if not running
+# --- ASCII Portrait + Emotion Detection ---
+# This is the "wow" moment: Claude Code recognizes you!
+DETECT_JSON=$("$VISION_BINARY" 2>/dev/null || echo '{"status":"error"}')
+DETECT_STATUS=$(echo "$DETECT_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
+
+if [ "$DETECT_STATUS" = "ok" ]; then
+  # Render ASCII portrait
+  "$VISION_BINARY" --ascii 80 25 2>/dev/null
+
+  # Show emotion below portrait
+  "$PYTHON" -c "
+import sys, json
+sys.path.insert(0, '$PLUGIN_DIR/src')
+from emotion import LandmarkEmotionDetector
+
+data = json.loads('''$DETECT_JSON''')
+d = LandmarkEmotionDetector()
+r = d.detect_from_landmarks(data.get('landmarks', {}))
+if r:
+    emojis = {'happy': ':)', 'sad': ':(', 'angry': '>:(', 'surprise': ':O', 'neutral': ':|'}
+    e = r['emotion']
+    emoji = emojis.get(e, '')
+    conf = r['confidence']
+    summary = d.get_emotion_summary(r['all_emotions'])
+    print(f'  ClaudeFace {emoji} {summary}')
+" 2>/dev/null || true
+elif [ "$DETECT_STATUS" = "no_face" ]; then
+  echo "  [ClaudeFace] Camera active, no face detected" >&2
+fi
+
+# --- Start Daemon ---
 daemon_running=false
 if [ -f "$PID_FILE" ]; then
   pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
@@ -35,28 +63,4 @@ fi
 
 if [ "$daemon_running" = false ]; then
   "$PYTHON" "$PLUGIN_DIR/src/daemon.py" start &>/dev/null &
-  # Wait briefly for first capture
-  sleep 4
-fi
-
-# Report current state
-if [ -f "$STATE_FILE" ]; then
-  "$PYTHON" -c "
-import json, sys, time
-try:
-    with open('$STATE_FILE') as f:
-        state = json.load(f)
-    age = time.time() - state.get('timestamp', 0)
-    emotion = state.get('emotion', 'unknown')
-    confidence = state.get('confidence', 0)
-    status = state.get('status', 'unknown')
-    if status == 'active' and emotion:
-        print(f'[ClaudeFace] Detected: {emotion} ({confidence:.0%})', file=sys.stderr)
-    elif status == 'no_face':
-        print('[ClaudeFace] No face detected', file=sys.stderr)
-    else:
-        print(f'[ClaudeFace] Status: {status}', file=sys.stderr)
-except Exception:
-    pass
-" 2>&1 || true
 fi
