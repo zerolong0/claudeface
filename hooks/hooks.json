@@ -1,16 +1,28 @@
 {
-  "hooks": [
-    {
-      "matcher": "",
-      "event": "SessionStart",
-      "command": "bash hooks/session_start.sh",
-      "timeout": 15000
-    },
-    {
-      "matcher": "",
-      "event": "UserPromptSubmit",
-      "command": "bash hooks/user_prompt.sh",
-      "timeout": 5000
-    }
-  ]
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.sh",
+            "timeout": 15000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/user_prompt.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
 }

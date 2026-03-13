@@ -1,0 +1,26 @@
+{
+  "name": "claudeface",
+  "owner": {
+    "name": "zerolong",
+    "email": "zerolong0@github.com"
+  },
+  "metadata": {
+    "description": "ClaudeFace — Emotion-aware portraits for Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "claudeface",
+      "source": "./",
+      "description": "Detects user mood via MacBook camera and renders privacy-safe portraits. Supports safe mode (Vision landmarks only, no camera pixels) and clear mode (color pixel art).",
+      "version": "1.0.0",
+      "author": { "name": "zerolong" },
+      "homepage": "https://github.com/zerolong0/claudeface",
+      "repository": "https://github.com/zerolong0/claudeface",
+      "license": "MIT",
+      "keywords": ["emotion", "face", "camera", "portrait", "vision", "macos"],
+      "category": "productivity",
+      "tags": ["emotion-detection", "face-recognition", "privacy"]
+    }
+  ]
+}

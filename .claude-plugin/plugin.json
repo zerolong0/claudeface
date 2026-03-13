@@ -1,8 +1,15 @@
 {
   "name": "claudeface",
-  "version": "0.1.0",
-  "description": "Emotion-aware Claude Code plugin — captures facial expressions via MacBook camera and injects emotional context into conversations.",
-  "author": "zerolong",
-  "hooks": "hooks/hooks.json",
-  "mcp": ".mcp.json"
+  "version": "1.0.0",
+  "description": "Emotion-aware Claude Code plugin — detects user mood via MacBook camera and renders privacy-safe portraits using Vision framework landmarks.",
+  "author": {
+    "name": "zerolong",
+    "url": "https://github.com/zerolong0"
+  },
+  "homepage": "https://github.com/zerolong0/claudeface",
+  "repository": "https://github.com/zerolong0/claudeface",
+  "license": "MIT",
+  "keywords": ["emotion", "face", "camera", "portrait", "vision", "macos"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
 }

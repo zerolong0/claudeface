@@ -2,8 +2,8 @@
   "mcpServers": {
     "claudeface": {
       "command": "bash",
-      "args": ["-c", "source .venv/bin/activate && python src/mcp_server.py"],
-      "cwd": "."
+      "args": ["-c", "source ${CLAUDE_PLUGIN_ROOT}/.venv/bin/activate && python ${CLAUDE_PLUGIN_ROOT}/src/mcp_server.py"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
     }
   }
 }
