@@ -108,10 +108,10 @@ def get_interaction_suggestion() -> str:
 
 @mcp.tool()
 def get_user_portrait() -> str:
-    """Get a colored pixel art portrait of the user captured via webcam.
+    """Get a portrait of the user captured via webcam.
 
-    Returns ANSI 24-bit true color pixel art using Unicode half-block characters.
-    The portrait uses face detection to crop and center on the user's face.
+    Auto-detects the best terminal image protocol (iTerm2/Kitty/Sixel/ANSI).
+    Returns the portrait using the highest quality rendering available.
     """
     import subprocess
 
@@ -123,7 +123,7 @@ def get_user_portrait() -> str:
 
     try:
         result = subprocess.run(
-            [str(VISION_BINARY), "--pixel", "40", "10"],
+            [str(VISION_BINARY), "--image", "300", "300"],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:

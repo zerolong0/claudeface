@@ -8,10 +8,14 @@
 ///             -framework AVFoundation -framework Vision -framework CoreMedia \
 ///             -framework CoreGraphics -framework CoreImage
 ///
-/// Usage:  bin/claudeface-vision          → single detect, JSON to stdout
-///         bin/claudeface-vision --ascii   → ASCII portrait to stdout
-///         bin/claudeface-vision --ascii W H  → custom size (default 80x35)
-///         bin/claudeface-vision --check   → permission/camera check only
+/// Usage:  bin/claudeface-vision              → single detect, JSON to stdout
+///         bin/claudeface-vision --image       → auto-detect best terminal protocol
+///         bin/claudeface-vision --image W H   → native image (iTerm2/Kitty/Sixel/ANSI)
+///         bin/claudeface-vision --image W H proto → force protocol (iterm2/kitty/sixel/ansi)
+///         bin/claudeface-vision --pixel W H   → ANSI half-block pixel art
+///         bin/claudeface-vision --ascii W H   → B&W ASCII half-block portrait
+///         bin/claudeface-vision --ascii-mini W H → Braille mini portrait
+///         bin/claudeface-vision --check       → permission/camera check only
 
 import AVFoundation
 import CoreGraphics
@@ -720,6 +724,425 @@ func renderBrailleMini(
     print(lines.joined(separator: "\n"))
 }
 
+// MARK: - Terminal Image Protocol Support (Progressive Degradation)
+
+/// Supported terminal image protocols, in order of preference.
+enum TerminalImageProtocol: String {
+    case iterm2  // iTerm2 inline images (best macOS support)
+    case kitty   // Kitty graphics protocol
+    case sixel   // DEC Sixel
+    case ansi    // ANSI half-block fallback (current --pixel)
+}
+
+/// Detect the best available terminal image protocol from environment.
+func detectTerminalProtocol() -> TerminalImageProtocol {
+    let env = ProcessInfo.processInfo.environment
+
+    // iTerm2: LC_TERMINAL=iTerm2 or TERM_PROGRAM=iTerm.app or WezTerm
+    if let lcTerm = env["LC_TERMINAL"], lcTerm.lowercased().contains("iterm") {
+        return .iterm2
+    }
+    if let termProg = env["TERM_PROGRAM"] {
+        let tp = termProg.lowercased()
+        if tp.contains("iterm") { return .iterm2 }
+        if tp.contains("wezterm") { return .iterm2 }  // WezTerm supports all, prefer iTerm2 (simplest)
+    }
+
+    // Kitty: TERM=xterm-kitty or TERM_PROGRAM=Ghostty
+    if let term = env["TERM"], term.contains("kitty") {
+        return .kitty
+    }
+    if env["KITTY_WINDOW_ID"] != nil {
+        return .kitty
+    }
+    if let termProg = env["TERM_PROGRAM"]?.lowercased() {
+        if termProg.contains("ghostty") { return .kitty }
+    }
+
+    // Sixel: check TERM for terminals known to support it (mintty, mlterm, foot)
+    // Most modern terminals that support Sixel also support iTerm2/Kitty,
+    // so this is mainly a fallback for Linux terminals.
+    // On macOS, iTerm2 supports Sixel too but we prefer native protocol.
+
+    return .ansi  // universal fallback
+}
+
+/// Crop a CVPixelBuffer to the face region and return PNG data.
+func cropFaceToPNG(
+    pixelBuffer: CVPixelBuffer,
+    faceBBox: [Double]?,
+    maxWidth: Int = 400,
+    maxHeight: Int = 400
+) -> Data? {
+    let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+    let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+
+    // Determine crop rect
+    var cropRect = CGRect(x: 0, y: 0, width: imgWidth, height: imgHeight)
+
+    if let bbox = faceBBox, bbox.count == 4 {
+        let padding = 0.4
+        let centerX = bbox[0] + bbox[2] / 2.0
+        let centerY = bbox[1] + bbox[3] / 2.0
+        let padW = bbox[2] * (1.0 + padding * 2)
+        let padH = bbox[3] * (1.0 + padding * 2)
+
+        let pixCX = centerX * Double(imgWidth)
+        let pixCY = (1.0 - centerY) * Double(imgHeight)  // flip Y
+        let pixW = padW * Double(imgWidth)
+        let pixH = padH * Double(imgHeight)
+
+        let x = max(0, pixCX - pixW / 2.0)
+        let y = max(0, pixCY - pixH / 2.0)
+        let w = min(Double(imgWidth) - x, pixW)
+        let h = min(Double(imgHeight) - y, pixH)
+
+        if w >= 50 && h >= 50 {
+            cropRect = CGRect(x: x, y: y, width: w, height: h)
+        }
+    }
+
+    // Create CIImage from pixel buffer, crop, mirror, resize, export PNG
+    var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    ciImage = ciImage.cropped(to: cropRect)
+
+    // Mirror horizontally (selfie)
+    ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+        .translatedBy(x: -ciImage.extent.width, y: 0))
+
+    // Scale down to target size
+    let scaleX = Double(maxWidth) / ciImage.extent.width
+    let scaleY = Double(maxHeight) / ciImage.extent.height
+    let scale = min(scaleX, scaleY, 1.0)  // don't upscale
+    if scale < 1.0 {
+        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    }
+
+    let context = CIContext()
+    guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+        return nil
+    }
+
+    // Encode to PNG
+    let mutableData = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(mutableData, "public.png" as CFString, 1, nil) else {
+        return nil
+    }
+    CGImageDestinationAddImage(dest, cgImage, nil)
+    guard CGImageDestinationFinalize(dest) else {
+        return nil
+    }
+
+    return mutableData as Data
+}
+
+/// Get raw RGBA pixel data from a face-cropped region.
+func cropFaceToRGBA(
+    pixelBuffer: CVPixelBuffer,
+    faceBBox: [Double]?,
+    targetWidth: Int = 200,
+    targetHeight: Int = 200
+) -> (data: [UInt8], width: Int, height: Int)? {
+    let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+    let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+
+    var cropRect = CGRect(x: 0, y: 0, width: imgWidth, height: imgHeight)
+
+    if let bbox = faceBBox, bbox.count == 4 {
+        let padding = 0.4
+        let centerX = bbox[0] + bbox[2] / 2.0
+        let centerY = bbox[1] + bbox[3] / 2.0
+        let padW = bbox[2] * (1.0 + padding * 2)
+        let padH = bbox[3] * (1.0 + padding * 2)
+        let pixCX = centerX * Double(imgWidth)
+        let pixCY = (1.0 - centerY) * Double(imgHeight)
+        let pixW = padW * Double(imgWidth)
+        let pixH = padH * Double(imgHeight)
+        let x = max(0, pixCX - pixW / 2.0)
+        let y = max(0, pixCY - pixH / 2.0)
+        let w = min(Double(imgWidth) - x, pixW)
+        let h = min(Double(imgHeight) - y, pixH)
+        if w >= 50 && h >= 50 {
+            cropRect = CGRect(x: x, y: y, width: w, height: h)
+        }
+    }
+
+    var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    ciImage = ciImage.cropped(to: cropRect)
+    ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+        .translatedBy(x: -ciImage.extent.width, y: 0))
+
+    let scaleX = Double(targetWidth) / ciImage.extent.width
+    let scaleY = Double(targetHeight) / ciImage.extent.height
+    let scale = min(scaleX, scaleY, 1.0)
+    if scale < 1.0 {
+        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    }
+
+    let ctx = CIContext()
+    let extent = ciImage.extent
+    let w = Int(extent.width)
+    let h = Int(extent.height)
+
+    guard let cgImage = ctx.createCGImage(ciImage, from: extent) else { return nil }
+
+    var rgba = [UInt8](repeating: 0, count: w * h * 4)
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let bitmapCtx = CGContext(
+        data: &rgba, width: w, height: h,
+        bitsPerComponent: 8, bytesPerRow: w * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+
+    bitmapCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return (rgba, w, h)
+}
+
+// MARK: - iTerm2 Inline Image Protocol
+
+/// Render using iTerm2 inline image protocol (OSC 1337).
+/// Format: ESC ] 1337 ; File=inline=1;size=N;width=Xpx;height=Ypx;preserveAspectRatio=1 : BASE64 BEL
+func renderITerm2(pixelBuffer: CVPixelBuffer, faceBBox: [Double]?, widthPx: Int, heightPx: Int) -> Bool {
+    guard let pngData = cropFaceToPNG(pixelBuffer: pixelBuffer, faceBBox: faceBBox,
+                                       maxWidth: widthPx, maxHeight: heightPx) else {
+        return false
+    }
+
+    let b64 = pngData.base64EncodedString()
+    let size = pngData.count
+
+    // Use pixel dimensions for sizing (px suffix)
+    print("\u{1B}]1337;File=inline=1;size=\(size);width=\(widthPx)px;height=\(heightPx)px;preserveAspectRatio=1:\(b64)\u{07}", terminator: "")
+    print("")  // newline after image
+    return true
+}
+
+// MARK: - Kitty Graphics Protocol
+
+/// Render using Kitty graphics protocol (APC).
+/// Sends PNG data as chunked base64.
+func renderKitty(pixelBuffer: CVPixelBuffer, faceBBox: [Double]?, widthPx: Int, heightPx: Int) -> Bool {
+    guard let pngData = cropFaceToPNG(pixelBuffer: pixelBuffer, faceBBox: faceBBox,
+                                       maxWidth: widthPx, maxHeight: heightPx) else {
+        return false
+    }
+
+    let b64 = pngData.base64EncodedString()
+    let chunkSize = 4096
+
+    // Send in chunks: first chunk with metadata, subsequent chunks continuation
+    var offset = 0
+    var isFirst = true
+
+    while offset < b64.count {
+        let end = min(offset + chunkSize, b64.count)
+        let startIdx = b64.index(b64.startIndex, offsetBy: offset)
+        let endIdx = b64.index(b64.startIndex, offsetBy: end)
+        let chunk = String(b64[startIdx..<endIdx])
+        let more = end < b64.count ? 1 : 0
+
+        if isFirst {
+            // a=T (transmit+display), f=100 (PNG), t=d (direct data), m=more
+            print("\u{1B}_Ga=T,f=100,t=d,m=\(more);\(chunk)\u{1B}\\", terminator: "")
+            isFirst = false
+        } else {
+            print("\u{1B}_Gm=\(more);\(chunk)\u{1B}\\", terminator: "")
+        }
+
+        offset = end
+    }
+
+    print("")  // newline after image
+    return true
+}
+
+// MARK: - Sixel Protocol
+
+/// Render using DEC Sixel protocol.
+/// Each Sixel row = 6 vertical pixels. Uses 256-color palette with median-cut quantization.
+func renderSixel(pixelBuffer: CVPixelBuffer, faceBBox: [Double]?, targetWidth: Int, targetHeight: Int) -> Bool {
+    guard let rgbaResult = cropFaceToRGBA(
+        pixelBuffer: pixelBuffer, faceBBox: faceBBox,
+        targetWidth: targetWidth, targetHeight: targetHeight
+    ) else {
+        return false
+    }
+
+    let (rgba, w, h) = rgbaResult
+
+    // Step 1: Build color palette (uniform quantization to 216 colors = 6^3)
+    let levels = 6
+    let step = 255 / (levels - 1)
+
+    func quantizeChannel(_ v: UInt8) -> UInt8 {
+        return UInt8(min(255, (Int(v) + step / 2) / step * step))
+    }
+
+    // Build palette: 216 colors (6x6x6 cube)
+    var palette: [(r: UInt8, g: UInt8, b: UInt8)] = []
+    for ri in 0..<levels {
+        for gi in 0..<levels {
+            for bi in 0..<levels {
+                palette.append((UInt8(ri * step), UInt8(gi * step), UInt8(bi * step)))
+            }
+        }
+    }
+
+    // Map each pixel to nearest palette index
+    var indexed = [Int](repeating: 0, count: w * h)
+    for i in 0..<(w * h) {
+        let r = rgba[i * 4]
+        let g = rgba[i * 4 + 1]
+        let b = rgba[i * 4 + 2]
+
+        let ri = min(levels - 1, (Int(r) + step / 2) / step)
+        let gi = min(levels - 1, (Int(g) + step / 2) / step)
+        let bi = min(levels - 1, (Int(b) + step / 2) / step)
+
+        indexed[i] = ri * levels * levels + gi * levels + bi
+    }
+
+    // Step 2: Encode Sixel
+    var sixel = ""
+
+    // DCS: P0;1;q  (P0=normal aspect, 1=background, q=begin sixel data)
+    sixel += "\u{1B}P0;1;q"
+
+    // Raster attributes: "W;H (pixel dimensions)
+    sixel += "\"1;1;\(w);\(h)"
+
+    // Color definitions (#index;2;R%;G%;B%)
+    // Only define colors that are actually used
+    var usedColors = Set<Int>()
+    for idx in indexed { usedColors.insert(idx) }
+
+    for idx in usedColors.sorted() {
+        let c = palette[idx]
+        let rPct = Int(round(Double(c.r) / 255.0 * 100.0))
+        let gPct = Int(round(Double(c.g) / 255.0 * 100.0))
+        let bPct = Int(round(Double(c.b) / 255.0 * 100.0))
+        sixel += "#\(idx);2;\(rPct);\(gPct);\(bPct)"
+    }
+
+    // Step 3: Output sixel rows (each row = 6 vertical pixels)
+    let sixelRows = (h + 5) / 6
+
+    for sixelRow in 0..<sixelRows {
+        let y0 = sixelRow * 6
+
+        // For each color used in this row band, output a line
+        var colorsInBand = Set<Int>()
+        for dy in 0..<6 {
+            let y = y0 + dy
+            if y >= h { break }
+            for x in 0..<w {
+                colorsInBand.insert(indexed[y * w + x])
+            }
+        }
+
+        var isFirstColor = true
+        for colorIdx in colorsInBand.sorted() {
+            sixel += "#\(colorIdx)"
+
+            // Build sixel data for this color
+            var rleData: [UInt8] = []
+            for x in 0..<w {
+                var bits: UInt8 = 0
+                for dy in 0..<6 {
+                    let y = y0 + dy
+                    if y < h && indexed[y * w + x] == colorIdx {
+                        bits |= (1 << dy)
+                    }
+                }
+                rleData.append(bits + 63)  // Sixel char = bits + 63
+            }
+
+            // RLE compression
+            var i = 0
+            while i < rleData.count {
+                let ch = rleData[i]
+                var run = 1
+                while i + run < rleData.count && rleData[i + run] == ch && run < 255 {
+                    run += 1
+                }
+                if run >= 3 {
+                    sixel += "!\(run)\(Character(UnicodeScalar(ch)))"
+                } else {
+                    for _ in 0..<run {
+                        sixel += String(Character(UnicodeScalar(ch)))
+                    }
+                }
+                i += run
+            }
+
+            // $ = carriage return (same row, next color)
+            if !isFirstColor || colorsInBand.count > 1 {
+                // After each color except the last, use $ to return to start of line
+            }
+            isFirstColor = false
+
+            // If not the last color in this band, use $ (CR)
+            if colorIdx != colorsInBand.sorted().last {
+                sixel += "$"
+            }
+        }
+
+        // - = new line (next sixel row)
+        if sixelRow < sixelRows - 1 {
+            sixel += "-"
+        }
+    }
+
+    // ST: end sixel
+    sixel += "\u{1B}\\"
+
+    print(sixel, terminator: "")
+    print("")
+    return true
+}
+
+// MARK: - Auto Image Renderer
+
+/// Render face portrait using the best available terminal image protocol.
+/// Falls back through: iTerm2 → Kitty → Sixel → ANSI half-block pixel art.
+func renderImage(
+    pixelBuffer: CVPixelBuffer,
+    faceBBox: [Double]?,
+    protocol proto: TerminalImageProtocol? = nil,
+    width: Int = 300,
+    height: Int = 300
+) {
+    let selectedProto = proto ?? detectTerminalProtocol()
+
+    switch selectedProto {
+    case .iterm2:
+        if renderITerm2(pixelBuffer: pixelBuffer, faceBBox: faceBBox, widthPx: width, heightPx: height) {
+            return
+        }
+        // Fallback to kitty
+        if renderKitty(pixelBuffer: pixelBuffer, faceBBox: faceBBox, widthPx: width, heightPx: height) {
+            return
+        }
+        renderPixelArt(pixelBuffer: pixelBuffer, faceBBox: faceBBox, width: 40, height: 10)
+
+    case .kitty:
+        if renderKitty(pixelBuffer: pixelBuffer, faceBBox: faceBBox, widthPx: width, heightPx: height) {
+            return
+        }
+        renderPixelArt(pixelBuffer: pixelBuffer, faceBBox: faceBBox, width: 40, height: 10)
+
+    case .sixel:
+        if renderSixel(pixelBuffer: pixelBuffer, faceBBox: faceBBox, targetWidth: width, targetHeight: height) {
+            return
+        }
+        renderPixelArt(pixelBuffer: pixelBuffer, faceBBox: faceBBox, width: 40, height: 10)
+
+    case .ansi:
+        renderPixelArt(pixelBuffer: pixelBuffer, faceBBox: faceBBox, width: 40, height: 10)
+    }
+}
+
 // MARK: - Permission Check
 
 func checkOnly() -> [String: Any] {
@@ -759,6 +1182,32 @@ let args = CommandLine.arguments
 
 if args.count > 1 && args[1] == "--check" {
     printJSON(checkOnly())
+} else if args.count > 1 && args[1] == "--image" {
+    // Auto-detect best terminal image protocol: --image [W] [H] [protocol]
+    // protocol: auto (default), iterm2, kitty, sixel, ansi
+    let w = args.count > 2 ? Int(args[2]) ?? 300 : 300
+    let h = args.count > 3 ? Int(args[3]) ?? 300 : 300
+    let protoName = args.count > 4 ? args[4] : "auto"
+
+    let proto: TerminalImageProtocol? = {
+        switch protoName {
+        case "iterm2": return .iterm2
+        case "kitty": return .kitty
+        case "sixel": return .sixel
+        case "ansi": return .ansi
+        default: return nil  // auto-detect
+        }
+    }()
+
+    let capturer = FrameCapturer(highRes: true)  // high res for native image protocols
+    if let pb = capturer.captureFrame() {
+        let result = detectLandmarks(from: pb)
+        let bbox = result["bbox"] as? [Double]
+        renderImage(pixelBuffer: pb, faceBBox: bbox, protocol: proto, width: w, height: h)
+        _ = pb
+    } else {
+        fputs("[error] Failed to capture frame.\n", stderr)
+    }
 } else if args.count > 1 && args[1] == "--pixel" {
     // Colored pixel art portrait: --pixel [W] [H]
     let w = args.count > 2 ? Int(args[2]) ?? 60 : 60

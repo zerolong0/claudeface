@@ -28,8 +28,9 @@ DETECT_JSON=$("$VISION_BINARY" 2>/dev/null || echo '{"status":"error"}')
 DETECT_STATUS=$(echo "$DETECT_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
 
 if [ "$DETECT_STATUS" = "ok" ]; then
-  # Render colored pixel art portrait directly to terminal (bypasses Claude context capture)
-  "$VISION_BINARY" --pixel 40 10 > /dev/tty 2>/dev/null || true
+  # Render portrait using best available terminal protocol (bypasses Claude context capture)
+  # Auto-detects: iTerm2 → Kitty → Sixel → ANSI half-block pixel art
+  "$VISION_BINARY" --image 300 300 > /dev/tty 2>/dev/null || true
 
   # Show emotion as compact one-liner (this goes to Claude context, intentionally small)
   "$PYTHON" -c "
