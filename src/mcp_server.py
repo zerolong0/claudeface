@@ -21,6 +21,7 @@ from strategy import InteractionStrategy
 
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
+MINI_PORTRAIT_FILE = STATE_DIR / "mini_portrait.txt"
 PID_FILE = STATE_DIR / "daemon.pid"
 VISION_BINARY = _PROJECT_ROOT / "bin" / "claudeface-vision"
 
@@ -108,34 +109,38 @@ def get_interaction_suggestion() -> str:
 
 @mcp.tool()
 def get_user_portrait() -> str:
-    """Get a portrait of the user captured via webcam.
+    """Get user portrait from daemon cache. Two modes available:
 
-    Auto-detects the best terminal image protocol (iTerm2/Kitty/Sixel/ANSI).
-    Returns the portrait using the highest quality rendering available.
+    - "safe" (default): Landmark line-art using only Vision coordinate points. No camera pixels used. Privacy-safe.
+    - "clear": Color pixel art from camera. More detailed but uses actual image data.
+
+    Both are cached by the daemon and updated every 30 seconds. No additional photo is taken.
     """
-    import subprocess
+    safe_file = STATE_DIR / "portrait_landmark.txt"
+    clear_file = STATE_DIR / "portrait_color.txt"
 
-    if not VISION_BINARY.exists():
-        return json.dumps({
-            "status": "error",
-            "message": "Vision binary not found. Run setup.sh to compile.",
-        })
+    result = {}
+    try:
+        portrait = safe_file.read_text().strip()
+        if portrait:
+            result["safe"] = portrait
+    except FileNotFoundError:
+        pass
 
     try:
-        result = subprocess.run(
-            [str(VISION_BINARY), "--image", "300", "300"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode != 0:
-            return json.dumps({
-                "status": "error",
-                "message": result.stderr.strip() or "Failed to capture portrait.",
-            })
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        return json.dumps({"status": "error", "message": "Portrait capture timed out."})
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
+        portrait = clear_file.read_text().strip()
+        if portrait:
+            result["clear"] = portrait
+    except FileNotFoundError:
+        pass
+
+    if result:
+        return json.dumps(result, ensure_ascii=False)
+
+    return json.dumps({
+        "status": "unavailable",
+        "message": "No cached portrait available. Daemon may not be running.",
+    })
 
 
 @mcp.tool()

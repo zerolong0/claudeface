@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ClaudeFace SessionStart Hook
-# Renders ASCII portrait + emotion, then starts the daemon.
+# Detects emotion via Vision framework, then starts the daemon.
 
 set -euo pipefail
 
@@ -22,17 +22,12 @@ if [ ! -f "$VISION_BINARY" ]; then
   exit 0
 fi
 
-# --- ASCII Portrait + Emotion Detection ---
-# This is the "wow" moment: Claude Code recognizes you!
+# --- Emotion Detection (Vision framework only, no portrait rendering) ---
 DETECT_JSON=$("$VISION_BINARY" 2>/dev/null || echo '{"status":"error"}')
 DETECT_STATUS=$(echo "$DETECT_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
 
 if [ "$DETECT_STATUS" = "ok" ]; then
-  # Render portrait using best available terminal protocol (bypasses Claude context capture)
-  # Auto-detects: iTerm2 → Kitty → Sixel → ANSI half-block pixel art
-  "$VISION_BINARY" --image 300 300 > /dev/tty 2>/dev/null || true
-
-  # Show emotion as compact one-liner (this goes to Claude context, intentionally small)
+  # Show emotion as compact one-liner (enters Claude context)
   "$PYTHON" -c "
 import sys, json
 sys.path.insert(0, '$PLUGIN_DIR/src')

@@ -141,6 +141,11 @@ func detectLandmarks(from pixelBuffer: CVPixelBuffer) -> [String: Any] {
         round(Double(box.height) * 10000) / 10000,
     ]
 
+    // 3D head orientation
+    if let roll = face.roll { data["roll"] = Double(truncating: roll) }
+    if let yaw = face.yaw { data["yaw"] = Double(truncating: yaw) }
+    if let pitch = face.pitch { data["pitch"] = Double(truncating: pitch) }
+
     if let lm = face.landmarks {
         var landmarks: [String: [[Double]]] = [:]
 
@@ -159,6 +164,11 @@ func detectLandmarks(from pixelBuffer: CVPixelBuffer) -> [String: Any] {
         extract("outerLips", lm.outerLips)
         extract("innerLips", lm.innerLips)
         extract("nose", lm.nose)
+        extract("faceContour", lm.faceContour)
+        extract("noseCrest", lm.noseCrest)
+        extract("medianLine", lm.medianLine)
+        extract("leftPupil", lm.leftPupil)
+        extract("rightPupil", lm.rightPupil)
 
         data["landmarks"] = landmarks
     }
@@ -616,14 +626,14 @@ func renderBrailleMini(
     guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
     let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
 
-    // Face crop region
+    // Face crop region — generous padding to include hair + shoulders
     var cropX = 0, cropY = 0, cropW = imgWidth, cropH = imgHeight
     if let bbox = faceBBox, bbox.count == 4 {
-        let padding = 0.3
+        let padding = 0.5
         let centerX = bbox[0] + bbox[2] / 2.0
         let centerY = bbox[1] + bbox[3] / 2.0
         let padW = bbox[2] * (1.0 + padding * 2)
-        let padH = bbox[3] * (1.0 + padding * 2)
+        let padH = bbox[3] * (1.0 + padding * 2) * 1.3  // extend down for shoulders
         let pixCX = centerX * Double(imgWidth)
         let pixCY = (1.0 - centerY) * Double(imgHeight)
         let pW = padW * Double(imgWidth)
@@ -676,7 +686,7 @@ func renderBrailleMini(
         }
     }
 
-    // Adaptive threshold
+    // Adaptive threshold for clean edge detection
     let radius = max(pixW / 8, 3)
     let bias: Double = 10.0
     var integral = [[Double]](repeating: [Double](repeating: 0, count: pixW + 1), count: pixH + 1)
@@ -713,6 +723,391 @@ func renderBrailleMini(
                     let px = termCol * 2 + dx
                     if py < pixH && px < pixW && !binary[py][px] {
                         // Dark pixel → dot ON (ink-on-paper: dark = feature)
+                        codepoint |= dotBits[dy][dx]
+                    }
+                }
+            }
+            line += String(UnicodeScalar(codepoint)!)
+        }
+        lines.append(line)
+    }
+    print(lines.joined(separator: "\n"))
+}
+
+// MARK: - Person Segmentation Mask (silhouette only, no photo)
+
+/// Extract person segmentation mask as a downsampled binary grid.
+/// Returns only the silhouette outline — no facial detail, no RGB data.
+/// The mask shows head shape (including hair), shoulders, and body outline.
+func extractSegmentationMask(
+    from pixelBuffer: CVPixelBuffer,
+    faceBBox: [Double],
+    targetWidth: Int,
+    targetHeight: Int
+) -> [[Bool]]? {
+    let segRequest = VNGeneratePersonSegmentationRequest()
+    segRequest.qualityLevel = .balanced
+    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+
+    do {
+        try handler.perform([segRequest])
+    } catch {
+        return nil
+    }
+
+    guard let result = segRequest.results?.first,
+          let maskBuffer = result.pixelBuffer as CVPixelBuffer? else {
+        return nil
+    }
+
+    CVPixelBufferLockBaseAddress(maskBuffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(maskBuffer, .readOnly) }
+
+    let maskW = CVPixelBufferGetWidth(maskBuffer)
+    let maskH = CVPixelBufferGetHeight(maskBuffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(maskBuffer)
+    guard let base = CVPixelBufferGetBaseAddress(maskBuffer) else { return nil }
+    let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+    // Crop to face region with padding (same logic as portrait)
+    let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+    let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+    let padding = 0.6  // more padding to include hair + shoulders
+    let centerX = faceBBox[0] + faceBBox[2] / 2.0
+    let centerY = faceBBox[1] + faceBBox[3] / 2.0
+    let padW = faceBBox[2] * (1.0 + padding * 2)
+    let padH = faceBBox[3] * (1.0 + padding * 2) * 1.5  // extend down for shoulders
+
+    // Map face bbox to mask coordinates
+    let mCX = centerX * Double(maskW)
+    let mCY = (1.0 - centerY) * Double(maskH)
+    let mW = padW * Double(maskW)
+    let mH = padH * Double(maskH)
+
+    let cropX = max(0, Int(mCX - mW / 2.0))
+    let cropY = max(0, Int(mCY - mH / 2.0))
+    let cropW = min(maskW - cropX, Int(mW))
+    let cropH = min(maskH - cropY, Int(mH))
+
+    guard cropW > 10 && cropH > 10 else { return nil }
+
+    // Downsample mask to target grid
+    let blockW = Double(cropW) / Double(targetWidth)
+    let blockH = Double(cropH) / Double(targetHeight)
+
+    var grid = [[Bool]](repeating: [Bool](repeating: false, count: targetWidth), count: targetHeight)
+
+    for row in 0..<targetHeight {
+        let srcYStart = cropY + Int(Double(row) * blockH)
+        let srcYEnd = min(cropY + Int(Double(row + 1) * blockH), cropY + cropH)
+        for col in 0..<targetWidth {
+            let mirrorCol = targetWidth - 1 - col  // selfie mirror
+            let srcXStart = cropX + Int(Double(mirrorCol) * blockW)
+            let srcXEnd = min(cropX + Int(Double(mirrorCol + 1) * blockW), cropX + cropW)
+
+            var sum = 0, count = 0
+            for sy in srcYStart..<srcYEnd {
+                for sx in srcXStart..<srcXEnd {
+                    sum += Int(ptr[sy * bytesPerRow + sx])
+                    count += 1
+                }
+            }
+            grid[row][col] = count > 0 && (sum / count) > 128
+        }
+    }
+    return grid
+}
+
+// MARK: - Landmark-based Line Art Portrait (Privacy-preserving)
+
+/// Render a face portrait using ONLY Vision landmark coordinates.
+/// No camera pixels are used — just the detected feature point positions.
+/// This creates a stylized line-drawing that's unique to each user's face shape.
+func renderLandmarkPortrait(
+    landmarks: [String: [[Double]]],
+    bbox: [Double],
+    width: Int = 30,
+    height: Int = 15,
+    segmentationMask: [[Bool]]? = nil  // person silhouette from VNGeneratePersonSegmentation
+) {
+    // Braille dot bit positions within a 2x4 cell
+    let dotBits: [[UInt32]] = [
+        [0x01, 0x08],
+        [0x02, 0x10],
+        [0x04, 0x20],
+        [0x40, 0x80],
+    ]
+
+    let pixW = width * 2
+    let pixH = height * 4
+
+    // Canvas: pixel grid for drawing
+    var canvas = [[Bool]](repeating: [Bool](repeating: false, count: pixW), count: pixH)
+
+    // Landmarks are normalized to face bounding box (0-1).
+    // Map to pixel grid with mirroring (selfie).
+    func mapPoint(_ pt: [Double]) -> (Int, Int) {
+        let x = pixW - 1 - Int(pt[0] * Double(pixW - 1))  // mirror X
+        let y = pixH - 1 - Int(pt[1] * Double(pixH - 1))  // flip Y (Vision origin = bottom-left)
+        return (max(0, min(pixW - 1, x)), max(0, min(pixH - 1, y)))
+    }
+
+    // Line thickness scales with canvas size
+    let thickness = 1  // thin lines for clean look
+
+    // Draw a single pixel
+    func setPixel(_ x: Int, _ y: Int) {
+        if x >= 0 && x < pixW && y >= 0 && y < pixH {
+            canvas[y][x] = true
+        }
+    }
+
+    // Draw a thick pixel (filled circle of given radius)
+    func setThickPixel(_ x: Int, _ y: Int, _ t: Int) {
+        if t <= 1 {
+            setPixel(x, y)
+            return
+        }
+        for dy in -t...t {
+            for dx in -t...t {
+                if dx * dx + dy * dy <= t * t {
+                    setPixel(x + dx, y + dy)
+                }
+            }
+        }
+    }
+
+    // Bresenham line drawing with thickness
+    func drawLine(_ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int, thick: Int = 0) {
+        let t = thick > 0 ? thick : thickness
+        var x0 = x0, y0 = y0
+        let dx = abs(x1 - x0)
+        let dy = abs(y1 - y0)
+        let sx = x0 < x1 ? 1 : -1
+        let sy = y0 < y1 ? 1 : -1
+        var err = dx - dy
+
+        while true {
+            setThickPixel(x0, y0, t)
+            if x0 == x1 && y0 == y1 { break }
+            let e2 = 2 * err
+            if e2 > -dy { err -= dy; x0 += sx }
+            if e2 < dx { err += dx; y0 += sy }
+        }
+    }
+
+    // Catmull-Rom spline interpolation for smooth curves
+    func catmullRom(_ p0: [Double], _ p1: [Double], _ p2: [Double], _ p3: [Double], _ t: Double) -> [Double] {
+        let t2 = t * t, t3 = t2 * t
+        let x = 0.5 * ((2 * p1[0]) +
+            (-p0[0] + p2[0]) * t +
+            (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+            (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+        let y = 0.5 * ((2 * p1[1]) +
+            (-p0[1] + p2[1]) * t +
+            (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+            (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+        return [x, y]
+    }
+
+    // Subdivide points using Catmull-Rom for smooth curves
+    func smoothPoints(_ points: [[Double]], close: Bool, subdivisions: Int = 8) -> [[Double]] {
+        guard points.count >= 2 else { return points }
+        var result: [[Double]] = []
+        let n = points.count
+
+        for i in 0..<(close ? n : n - 1) {
+            let p0 = points[close ? (i - 1 + n) % n : max(0, i - 1)]
+            let p1 = points[i]
+            let p2 = points[(i + 1) % n]
+            let p3 = points[close ? (i + 2) % n : min(n - 1, i + 2)]
+
+            for s in 0..<subdivisions {
+                let t = Double(s) / Double(subdivisions)
+                result.append(catmullRom(p0, p1, p2, p3, t))
+            }
+        }
+        if !close { result.append(points.last!) }
+        return result
+    }
+
+    // Draw connected smooth line strip
+    func drawStrip(_ points: [[Double]], close: Bool = true, thick: Int = 0) {
+        let smooth = smoothPoints(points, close: close)
+        guard smooth.count >= 2 else { return }
+        for i in 0..<(smooth.count - 1) {
+            let (x0, y0) = mapPoint(smooth[i])
+            let (x1, y1) = mapPoint(smooth[i + 1])
+            drawLine(x0, y0, x1, y1, thick: thick)
+        }
+        if close && smooth.count > 2 {
+            let (x0, y0) = mapPoint(smooth.last!)
+            let (x1, y1) = mapPoint(smooth.first!)
+            drawLine(x0, y0, x1, y1, thick: thick)
+        }
+    }
+
+    // Draw a filled dot
+    func drawDot(_ pt: [Double], radius: Int) {
+        let (cx, cy) = mapPoint(pt)
+        for dy in -radius...radius {
+            for dx in -radius...radius {
+                if dx * dx + dy * dy <= radius * radius {
+                    setPixel(cx + dx, cy + dy)
+                }
+            }
+        }
+    }
+
+    // Draw a circle outline (for iris)
+    func drawCircle(_ pt: [Double], radius: Int, thick: Int = 1) {
+        let (cx, cy) = mapPoint(pt)
+        let steps = max(36, radius * 8)
+        for i in 0..<steps {
+            let angle = Double(i) / Double(steps) * 2.0 * Double.pi
+            let x = cx + Int(round(Double(radius) * cos(angle)))
+            let y = cy + Int(round(Double(radius) * sin(angle)))
+            setThickPixel(x, y, thick)
+        }
+    }
+
+    // Flood fill a closed region (scanline fill between boundary points)
+    func fillPolygon(_ points: [[Double]]) {
+        let mapped = points.map { mapPoint($0) }
+        guard !mapped.isEmpty else { return }
+        let minY = mapped.map { $0.1 }.min()!
+        let maxY = mapped.map { $0.1 }.max()!
+
+        for y in minY...maxY {
+            var intersections: [Int] = []
+            let n = mapped.count
+            for i in 0..<n {
+                let j = (i + 1) % n
+                let (x0, y0) = mapped[i]
+                let (x1, y1) = mapped[j]
+                if (y0 <= y && y1 > y) || (y1 <= y && y0 > y) {
+                    let t = Double(y - y0) / Double(y1 - y0)
+                    intersections.append(Int(Double(x0) + t * Double(x1 - x0)))
+                }
+            }
+            intersections.sort()
+            var idx = 0
+            while idx + 1 < intersections.count {
+                for x in intersections[idx]...intersections[idx + 1] {
+                    setPixel(x, y)
+                }
+                idx += 2
+            }
+        }
+    }
+
+    // --- Draw segmentation mask outline (head/hair/shoulder silhouette) ---
+    if let mask = segmentationMask, mask.count == pixH, mask[0].count == pixW {
+        // Extract edge pixels from the binary mask
+        for y in 0..<pixH {
+            for x in 0..<pixW {
+                if mask[y][x] {
+                    // Check if this is a boundary pixel (neighbor is false)
+                    let isEdge = (x == 0 || !mask[y][x-1]) ||
+                                 (x == pixW-1 || !mask[y][x+1]) ||
+                                 (y == 0 || !mask[y-1][x]) ||
+                                 (y == pixH-1 || !mask[y+1][x])
+                    if isEdge {
+                        setThickPixel(x, y, thickness)
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Draw each facial feature ---
+
+    // Face contour (jawline) — thicker line (skip if we have segmentation mask)
+    if let contour = landmarks["faceContour"] {
+        drawStrip(contour, close: false)
+
+        // Add forehead arc: connect top of contour with a curved top
+        if contour.count >= 2 {
+            let leftTop = contour.last!
+            let rightTop = contour.first!
+            // Create arc points above the face
+            let midX = (leftTop[0] + rightTop[0]) / 2.0
+            let topY = max(leftTop[1], rightTop[1]) + 0.25  // above eyes
+            let steps = 12
+            var arcPoints: [[Double]] = [leftTop]
+            for i in 1..<steps {
+                let t = Double(i) / Double(steps)
+                // Quadratic bezier: left -> top -> right
+                let p0 = leftTop
+                let p1 = [midX, topY]  // control point (top of head)
+                let p2 = rightTop
+                let x = (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * p1[0] + t * t * p2[0]
+                let y = (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * p1[1] + t * t * p2[1]
+                arcPoints.append([x, y])
+            }
+            arcPoints.append(rightTop)
+            drawStrip(arcPoints, close: false)
+        }
+    }
+
+    // Eyebrows — filled (smooth + fill)
+    if let lb = landmarks["leftEyebrow"] {
+        let smooth = smoothPoints(lb, close: false)
+        // Create a thin filled shape by offsetting
+        var topPts = smooth
+        var botPts = smooth.map { [$0[0], $0[1] - 0.015] }  // offset down slightly
+        let fillPts = topPts + botPts.reversed()
+        fillPolygon(fillPts)
+        drawStrip(lb, close: false)
+    }
+    if let rb = landmarks["rightEyebrow"] {
+        let smooth = smoothPoints(rb, close: false)
+        var topPts = smooth
+        var botPts = smooth.map { [$0[0], $0[1] - 0.015] }
+        let fillPts = topPts + botPts.reversed()
+        fillPolygon(fillPts)
+        drawStrip(rb, close: false)
+    }
+
+    // Eyes (closed loops, smooth)
+    if let le = landmarks["leftEye"] { drawStrip(le, close: true, thick: thickness) }
+    if let re = landmarks["rightEye"] { drawStrip(re, close: true, thick: thickness) }
+
+    // Iris circle + filled pupil
+    let irisR = max(2, min(pixW, pixH) / 24)
+    let pupilR = max(1, irisR / 2)
+    if let lp = landmarks["leftPupil"], !lp.isEmpty {
+        drawCircle(lp[0], radius: irisR, thick: thickness)
+        drawDot(lp[0], radius: pupilR)
+    }
+    if let rp = landmarks["rightPupil"], !rp.isEmpty {
+        drawCircle(rp[0], radius: irisR, thick: thickness)
+        drawDot(rp[0], radius: pupilR)
+    }
+
+    // Nose (smooth curves)
+    if let nose = landmarks["nose"] { drawStrip(nose, close: false, thick: thickness) }
+    if let crest = landmarks["noseCrest"] { drawStrip(crest, close: false, thick: thickness) }
+
+    // Lips — outer filled, inner line
+    if let ol = landmarks["outerLips"] {
+        let smooth = smoothPoints(ol, close: true)
+        fillPolygon(smooth)
+        drawStrip(ol, close: true)
+    }
+    if let il = landmarks["innerLips"] { drawStrip(il, close: true, thick: thickness) }
+
+    // --- Encode to Braille ---
+    var lines: [String] = []
+    for termRow in 0..<height {
+        var line = ""
+        for termCol in 0..<width {
+            var codepoint: UInt32 = 0x2800
+            for dy in 0..<4 {
+                for dx in 0..<2 {
+                    let py = termRow * 4 + dy
+                    let px = termCol * 2 + dx
+                    if py < pixH && px < pixW && canvas[py][px] {
                         codepoint |= dotBits[dy][dx]
                     }
                 }
@@ -1182,6 +1577,31 @@ let args = CommandLine.arguments
 
 if args.count > 1 && args[1] == "--check" {
     printJSON(checkOnly())
+} else if args.count > 1 && args[1] == "--landmark" {
+    // Privacy-preserving landmark line-art portrait: --landmark [W] [H]
+    // Uses only Vision framework landmark coordinates, no camera pixels.
+    let w = args.count > 2 ? Int(args[2]) ?? 30 : 30
+    let h = args.count > 3 ? Int(args[3]) ?? 15 : 15
+
+    let capturer = FrameCapturer(highRes: false)
+    if let pb = capturer.captureFrame() {
+        let result = detectLandmarks(from: pb)
+        if let landmarks = result["landmarks"] as? [String: [[Double]]],
+           let bbox = result["bbox"] as? [Double] {
+            // Extract segmentation mask for silhouette (head shape, hair, shoulders)
+            let pixW = w * 2
+            let pixH = h * 4
+            let mask = extractSegmentationMask(from: pb, faceBBox: bbox,
+                                                targetWidth: pixW, targetHeight: pixH)
+            renderLandmarkPortrait(landmarks: landmarks, bbox: bbox, width: w, height: h,
+                                   segmentationMask: mask)
+        } else {
+            fputs("[error] No face landmarks detected.\n", stderr)
+        }
+        _ = pb
+    } else {
+        fputs("[error] Failed to capture frame.\n", stderr)
+    }
 } else if args.count > 1 && args[1] == "--image" {
     // Auto-detect best terminal image protocol: --image [W] [H] [protocol]
     // protocol: auto (default), iterm2, kitty, sixel, ansi

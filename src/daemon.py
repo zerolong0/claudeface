@@ -20,6 +20,8 @@ from emotion import LandmarkEmotionDetector
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
 MINI_PORTRAIT_FILE = STATE_DIR / "mini_portrait.txt"
+PORTRAIT_LANDMARK_FILE = STATE_DIR / "portrait_landmark.txt"
+PORTRAIT_COLOR_FILE = STATE_DIR / "portrait_color.txt"
 PID_FILE = STATE_DIR / "daemon.pid"
 VISION_BINARY = _PROJECT_ROOT / "bin" / "claudeface-vision"
 DEFAULT_INTERVAL = 10  # seconds
@@ -81,18 +83,41 @@ def _call_vision_binary() -> dict | None:
 
 
 def _update_mini_portrait() -> None:
-    """Capture a mini ASCII portrait and cache it to file."""
+    """Capture two portrait modes and cache to files:
+    1. Landmark (privacy-safe, only coordinate points)
+    2. Color pixel art (clear, uses camera pixels)
+    Also updates the legacy mini_portrait.txt for statusline.
+    """
     if not VISION_BINARY.exists():
         return
+
+    # Landmark portrait (safe mode - no camera pixels)
     try:
         result = subprocess.run(
-            [str(VISION_BINARY), "--ascii-mini", "15", "7"],
+            [str(VISION_BINARY), "--landmark", "30", "15"],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0 and result.stdout.strip():
-            tmp = MINI_PORTRAIT_FILE.with_suffix(".tmp")
+            tmp = PORTRAIT_LANDMARK_FILE.with_suffix(".tmp")
             tmp.write_text(result.stdout.strip())
-            tmp.replace(MINI_PORTRAIT_FILE)
+            tmp.replace(PORTRAIT_LANDMARK_FILE)
+            # Also use as default mini portrait for statusline
+            tmp2 = MINI_PORTRAIT_FILE.with_suffix(".tmp")
+            tmp2.write_text(result.stdout.strip())
+            tmp2.replace(MINI_PORTRAIT_FILE)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Color pixel art portrait (clear mode - uses camera pixels)
+    try:
+        result = subprocess.run(
+            [str(VISION_BINARY), "--pixel", "40", "10"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tmp = PORTRAIT_COLOR_FILE.with_suffix(".tmp")
+            tmp.write_text(result.stdout.strip())
+            tmp.replace(PORTRAIT_COLOR_FILE)
     except (subprocess.TimeoutExpired, OSError):
         pass
 
