@@ -1,11 +1,12 @@
-"""Background daemon that periodically captures camera frames,
-detects emotions, and writes state to ~/.claudeface/state.json.
+"""Background daemon that periodically invokes the native Swift vision binary,
+detects emotions from landmarks, and writes state to ~/.claudeface/state.json.
 """
 
 import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -14,12 +15,12 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from camera import CameraCapture
-from emotion import EmotionDetector
+from emotion import LandmarkEmotionDetector
 
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
 PID_FILE = STATE_DIR / "daemon.pid"
+VISION_BINARY = _PROJECT_ROOT / "bin" / "claudeface-vision"
 DEFAULT_INTERVAL = 10  # seconds
 DEFAULT_IDLE_TIMEOUT = 7200  # 2 hours
 
@@ -58,6 +59,25 @@ def _is_running(pid: int) -> bool:
         return False
 
 
+def _call_vision_binary() -> dict | None:
+    """Call the Swift vision binary and parse its JSON output."""
+    if not VISION_BINARY.exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            [str(VISION_BINARY)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout.strip())
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return None
+
+
 # ------------------------------------------------------------------
 # Main daemon loop
 # ------------------------------------------------------------------
@@ -66,14 +86,13 @@ def run_daemon(interval: float = DEFAULT_INTERVAL,
                idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> None:
     """Run the capture-detect loop until stopped or idle timeout."""
 
-    camera = CameraCapture()
-    detector = EmotionDetector()
+    detector = LandmarkEmotionDetector()
     start_time = time.time()
     running = True
 
     def _shutdown(signum, _frame):
         nonlocal running
-        print(f"\n[daemon] Received signal {signum}, shutting down…")
+        print(f"\n[daemon] Received signal {signum}, shutting down...")
         running = False
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -82,6 +101,7 @@ def run_daemon(interval: float = DEFAULT_INTERVAL,
     _write_pid()
     print(f"[daemon] Started (pid={os.getpid()}, interval={interval}s, "
           f"idle_timeout={idle_timeout}s)")
+    print(f"[daemon] Vision binary: {VISION_BINARY}")
 
     try:
         while running:
@@ -90,41 +110,59 @@ def run_daemon(interval: float = DEFAULT_INTERVAL,
                 print("[daemon] Idle timeout reached, shutting down.")
                 break
 
-            frame = camera.capture_frame()
-            if frame is None:
+            vision_data = _call_vision_binary()
+
+            if vision_data is None:
                 state = {
-                    "status": "no_camera",
+                    "status": "no_binary",
                     "emotion": None,
                     "confidence": 0,
                     "all_emotions": {},
                     "trend": "unknown",
                     "duration_sec": 0,
                     "timestamp": time.time(),
-                    "error": "Camera not available",
+                    "error": f"Vision binary not found: {VISION_BINARY}",
                 }
                 _write_state(state)
                 time.sleep(interval)
                 continue
 
-            detections = detector.detect(frame)
+            vision_status = vision_data.get("status", "error")
 
-            if detections:
-                face = detections[0]
-                detector.add_to_history(face["emotion"], face["confidence"])
-                trend_info = detector.get_emotion_trend()
-                summary = detector.get_emotion_summary(frame)
+            if vision_status == "ok":
+                landmarks = vision_data.get("landmarks", {})
+                detection = detector.detect_from_landmarks(landmarks)
 
-                state = {
-                    "status": "active",
-                    "emotion": face["emotion"],
-                    "confidence": face["confidence"],
-                    "all_emotions": face["all_emotions"],
-                    "summary": summary,
-                    "trend": trend_info["trend"],
-                    "duration_sec": trend_info["duration_sec"],
-                    "timestamp": time.time(),
-                }
-            else:
+                if detection:
+                    detector.add_to_history(
+                        detection["emotion"], detection["confidence"]
+                    )
+                    trend_info = detector.get_emotion_trend()
+                    summary = detector.get_emotion_summary(
+                        detection["all_emotions"]
+                    )
+
+                    state = {
+                        "status": "active",
+                        "emotion": detection["emotion"],
+                        "confidence": detection["confidence"],
+                        "all_emotions": detection["all_emotions"],
+                        "summary": summary,
+                        "trend": trend_info["trend"],
+                        "duration_sec": trend_info["duration_sec"],
+                        "timestamp": time.time(),
+                    }
+                else:
+                    state = {
+                        "status": "no_face",
+                        "emotion": None,
+                        "confidence": 0,
+                        "all_emotions": {},
+                        "trend": "unknown",
+                        "duration_sec": 0,
+                        "timestamp": time.time(),
+                    }
+            elif vision_status == "no_face":
                 state = {
                     "status": "no_face",
                     "emotion": None,
@@ -134,12 +172,22 @@ def run_daemon(interval: float = DEFAULT_INTERVAL,
                     "duration_sec": 0,
                     "timestamp": time.time(),
                 }
+            else:
+                state = {
+                    "status": vision_status,
+                    "emotion": None,
+                    "confidence": 0,
+                    "all_emotions": {},
+                    "trend": "unknown",
+                    "duration_sec": 0,
+                    "timestamp": time.time(),
+                    "error": vision_data.get("message", "Unknown error"),
+                }
 
             _write_state(state)
             time.sleep(interval)
 
     finally:
-        camera.stop()
         _remove_pid()
         print("[daemon] Stopped.")
 
@@ -152,6 +200,14 @@ def cmd_start(args):
     existing = _read_pid()
     if existing and _is_running(existing):
         print(f"[daemon] Already running (pid={existing}).")
+        return
+
+    # Check that the vision binary exists
+    if not VISION_BINARY.exists():
+        print(f"[daemon] ERROR: Vision binary not found at {VISION_BINARY}")
+        print(f"[daemon] Run setup.sh to compile it, or:")
+        print(f"  swiftc -O -o {VISION_BINARY} {_PROJECT_ROOT}/src/claudeface_vision.swift "
+              f"-framework AVFoundation -framework Vision -framework CoreMedia")
         return
 
     if args.foreground:
@@ -198,6 +254,11 @@ def cmd_status(_args):
         print(f"[state]  Trend: {state.get('trend')}")
     else:
         print("[state]  No state file found.")
+
+    if not VISION_BINARY.exists():
+        print(f"[binary] WARNING: {VISION_BINARY} not found. Run setup.sh.")
+    else:
+        print(f"[binary] OK: {VISION_BINARY}")
 
 
 def main():

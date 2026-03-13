@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ClaudeFace SessionStart Hook
-# Starts the daemon if not running, captures a portrait, renders it in terminal.
+# Starts the daemon if not running, reports initial emotion state.
 
 set -euo pipefail
 
@@ -10,10 +10,17 @@ STATE_DIR="$HOME/.claudeface"
 STATE_FILE="$STATE_DIR/state.json"
 PID_FILE="$STATE_DIR/daemon.pid"
 PYTHON="$VENV/bin/python"
+VISION_BINARY="$PLUGIN_DIR/bin/claudeface-vision"
 
 # Ensure venv exists
 if [ ! -f "$PYTHON" ]; then
   echo "[ClaudeFace] Virtual environment not found. Run setup.sh first." >&2
+  exit 0
+fi
+
+# Ensure vision binary exists
+if [ ! -f "$VISION_BINARY" ]; then
+  echo "[ClaudeFace] Vision binary not found. Run setup.sh to compile." >&2
   exit 0
 fi
 
@@ -29,29 +36,27 @@ fi
 if [ "$daemon_running" = false ]; then
   "$PYTHON" "$PLUGIN_DIR/src/daemon.py" start &>/dev/null &
   # Wait briefly for first capture
-  sleep 3
+  sleep 4
 fi
 
-# Capture and render portrait
-"$PYTHON" -c "
-import sys, json
-sys.path.insert(0, '$PLUGIN_DIR/src')
-from camera import CameraCapture
-from emotion import EmotionDetector
-from renderer import TerminalRenderer
-
-cam = CameraCapture()
-frame = cam.capture_frame()
-if frame is None:
-    print('[ClaudeFace] Camera not available.', file=sys.stderr)
-    sys.exit(0)
-
-detector = EmotionDetector()
-dominant = detector.get_dominant_emotion(frame)
-emotion = dominant[0] if dominant else None
-
-TerminalRenderer.render_portrait(frame, emotion_label=emotion)
-if emotion and dominant:
-    conf = dominant[1]
-    print(f'  ClaudeFace: Detected {emotion} ({conf:.0%})', file=sys.stderr)
+# Report current state
+if [ -f "$STATE_FILE" ]; then
+  "$PYTHON" -c "
+import json, sys, time
+try:
+    with open('$STATE_FILE') as f:
+        state = json.load(f)
+    age = time.time() - state.get('timestamp', 0)
+    emotion = state.get('emotion', 'unknown')
+    confidence = state.get('confidence', 0)
+    status = state.get('status', 'unknown')
+    if status == 'active' and emotion:
+        print(f'[ClaudeFace] Detected: {emotion} ({confidence:.0%})', file=sys.stderr)
+    elif status == 'no_face':
+        print('[ClaudeFace] No face detected', file=sys.stderr)
+    else:
+        print(f'[ClaudeFace] Status: {status}', file=sys.stderr)
+except Exception:
+    pass
 " 2>&1 || true
+fi

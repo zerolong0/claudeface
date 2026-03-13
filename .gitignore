@@ -18,6 +18,9 @@ build/
 .vscode/
 *.swp
 
+# Compiled binaries
+bin/
+
 # Test artifacts
 test_frame.jpg
 

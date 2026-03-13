@@ -2,8 +2,8 @@
 
 Exposes tools for Claude to query user emotional state:
   - get_user_mood: current emotion + confidence + trend
-  - get_user_portrait: capture fresh frame, return base64 image
   - get_interaction_suggestion: context-aware interaction advice
+  - get_daemon_status: health check
 """
 
 import json
@@ -22,6 +22,7 @@ from strategy import InteractionStrategy
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
 PID_FILE = STATE_DIR / "daemon.pid"
+VISION_BINARY = _PROJECT_ROOT / "bin" / "claudeface-vision"
 
 mcp = FastMCP("claudeface", instructions="ClaudeFace emotion sensing tools")
 strategy_engine = InteractionStrategy()
@@ -81,43 +82,6 @@ def get_user_mood() -> str:
 
 
 @mcp.tool()
-def get_user_portrait() -> str:
-    """Capture a fresh photo from the user's webcam and return it as base64.
-
-    Returns JSON with: image_base64 (JPEG), emotion (if detected).
-    Use this when you want to see what the user looks like right now.
-    """
-    import base64
-    try:
-        from camera import CameraCapture
-        from emotion import EmotionDetector
-
-        cam = CameraCapture()
-        frame = cam.capture_frame()
-        if frame is None:
-            return json.dumps({"error": "Camera not available"})
-
-        import cv2
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-
-        detector = EmotionDetector()
-        dominant = detector.get_dominant_emotion(frame)
-
-        result = {
-            "image_base64": b64,
-            "format": "jpeg",
-        }
-        if dominant:
-            result["emotion"] = dominant[0]
-            result["confidence"] = dominant[1]
-
-        return json.dumps(result)
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-
-@mcp.tool()
 def get_interaction_suggestion() -> str:
     """Get a suggestion for how to interact with the user based on their current mood.
 
@@ -128,7 +92,7 @@ def get_interaction_suggestion() -> str:
     if state is None or state.get("emotion") is None:
         return json.dumps({
             "tone": "balanced",
-            "context": "无法检测用户情绪，正常互动即可。",
+            "context": "Unable to detect user emotion. Interact normally.",
             "suggestions": ["maintain normal pace"],
             "priority": "low",
         }, ensure_ascii=False)
@@ -146,7 +110,7 @@ def get_interaction_suggestion() -> str:
 def get_daemon_status() -> str:
     """Check the health of the ClaudeFace daemon process.
 
-    Returns JSON with: running (bool), pid, state_age_sec.
+    Returns JSON with: running (bool), pid, state_age_sec, binary_exists.
     """
     running = _is_daemon_running()
     result = {"running": running}
@@ -162,6 +126,8 @@ def get_daemon_status() -> str:
         result["state_status"] = state.get("status")
     else:
         result["state_age_sec"] = None
+
+    result["binary_exists"] = VISION_BINARY.exists()
 
     return json.dumps(result)
 

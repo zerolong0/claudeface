@@ -35,27 +35,11 @@ class InteractionStrategy:
             "suggestions": ["be direct", "focus on solutions", "avoid filler"],
             "priority": "high",
         },
-        "fear": {
-            "tone": "reassuring",
-            "context": "用户可能感到困惑或不确定，请耐心解释，分步骤引导。",
-            "suggestions": [
-                "break into steps",
-                "explain reasoning",
-                "check understanding",
-            ],
-            "priority": "medium",
-        },
         "surprise": {
             "tone": "curious",
             "context": "用户可能遇到了意外情况，帮助他们理解发生了什么。",
             "suggestions": ["explain clearly", "provide context"],
             "priority": "low",
-        },
-        "disgust": {
-            "tone": "professional",
-            "context": "请保持专业客观的沟通方式。",
-            "suggestions": ["stay neutral", "focus on facts"],
-            "priority": "medium",
         },
         "neutral": {
             "tone": "balanced",
@@ -149,7 +133,7 @@ def main():
         print(json.dumps(strategy, indent=2, ensure_ascii=False))
     else:
         print("Usage: python src/strategy.py --test <emotion>")
-        print("Emotions: happy, sad, angry, fear, surprise, disgust, neutral")
+        print("Emotions: happy, sad, angry, surprise, neutral")
         sys.exit(1)
 
 
