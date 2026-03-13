@@ -21,7 +21,7 @@ final class FaceLandmarkDetector: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private let session = AVCaptureSession()
     private let semaphore = DispatchSemaphore(value: 0)
     private var frameCount = 0
-    private let warmupFrames = 3 // skip first N frames (camera auto-exposure warmup)
+    private let warmupFrames = 10 // skip first N frames (camera auto-exposure warmup)
     private var capturedResult: [String: Any]?
 
     /// Run one capture cycle: open camera → skip warmup → detect landmarks → return JSON-ready dict.
@@ -56,7 +56,7 @@ final class FaceLandmarkDetector: NSObject, AVCaptureVideoDataOutputSampleBuffer
                     "message": "No camera device found."]
         }
 
-        session.sessionPreset = .medium // 480x360, enough for face detection
+        session.sessionPreset = .high // use highest available resolution for reliable detection
         session.addInput(input)
 
         let output = AVCaptureVideoDataOutput()
