@@ -16,6 +16,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from emotion import LandmarkEmotionDetector
+import config as cfg
 
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
@@ -83,43 +84,47 @@ def _call_vision_binary() -> dict | None:
 
 
 def _update_mini_portrait() -> None:
-    """Capture two portrait modes and cache to files:
-    1. Landmark (privacy-safe, only coordinate points)
-    2. Color pixel art (clear, uses camera pixels)
-    Also updates the legacy mini_portrait.txt for statusline.
-    """
+    """Capture portraits based on user config and cache to files."""
     if not VISION_BINARY.exists():
         return
 
+    mode = cfg.get_portrait_mode()
+
     # Landmark portrait (safe mode - no camera pixels)
-    try:
-        result = subprocess.run(
-            [str(VISION_BINARY), "--landmark", "30", "15"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            tmp = PORTRAIT_LANDMARK_FILE.with_suffix(".tmp")
-            tmp.write_text(result.stdout.strip())
-            tmp.replace(PORTRAIT_LANDMARK_FILE)
-            # Also use as default mini portrait for statusline
-            tmp2 = MINI_PORTRAIT_FILE.with_suffix(".tmp")
-            tmp2.write_text(result.stdout.strip())
-            tmp2.replace(MINI_PORTRAIT_FILE)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    if mode in ("safe", "both"):
+        try:
+            result = subprocess.run(
+                [str(VISION_BINARY), "--landmark", "30", "15"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                tmp = PORTRAIT_LANDMARK_FILE.with_suffix(".tmp")
+                tmp.write_text(result.stdout.strip())
+                tmp.replace(PORTRAIT_LANDMARK_FILE)
+                if mode == "safe":
+                    tmp2 = MINI_PORTRAIT_FILE.with_suffix(".tmp")
+                    tmp2.write_text(result.stdout.strip())
+                    tmp2.replace(MINI_PORTRAIT_FILE)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
     # Color pixel art portrait (clear mode - uses camera pixels)
-    try:
-        result = subprocess.run(
-            [str(VISION_BINARY), "--pixel", "40", "10"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            tmp = PORTRAIT_COLOR_FILE.with_suffix(".tmp")
-            tmp.write_text(result.stdout.strip())
-            tmp.replace(PORTRAIT_COLOR_FILE)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    if mode in ("clear", "both"):
+        try:
+            result = subprocess.run(
+                [str(VISION_BINARY), "--pixel", "40", "10"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                tmp = PORTRAIT_COLOR_FILE.with_suffix(".tmp")
+                tmp.write_text(result.stdout.strip())
+                tmp.replace(PORTRAIT_COLOR_FILE)
+                if mode == "clear":
+                    tmp2 = MINI_PORTRAIT_FILE.with_suffix(".tmp")
+                    tmp2.write_text(result.stdout.strip())
+                    tmp2.replace(MINI_PORTRAIT_FILE)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
 
 # ------------------------------------------------------------------

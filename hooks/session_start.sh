@@ -22,6 +22,17 @@ if [ ! -f "$VISION_BINARY" ]; then
   exit 0
 fi
 
+# --- First-run notice: portrait mode ---
+CONFIG_FILE="$STATE_DIR/config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+  mkdir -p "$STATE_DIR"
+  echo '{"portrait_mode": "clear"}' > "$CONFIG_FILE"
+  echo "[ClaudeFace] Portrait mode: clear (color pixel art)" >&2
+  echo "  Switch anytime: ask Claude to 'set portrait mode to safe'" >&2
+  echo "  safe = privacy-first line-art (no camera pixels)" >&2
+  echo "  clear = color portrait (local only, never uploaded)" >&2
+fi
+
 # --- Emotion Detection (Vision framework only, no portrait rendering) ---
 DETECT_JSON=$("$VISION_BINARY" 2>/dev/null || echo '{"status":"error"}')
 DETECT_STATUS=$(echo "$DETECT_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")

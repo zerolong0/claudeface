@@ -18,6 +18,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
 from strategy import InteractionStrategy
+import config as cfg
 
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
@@ -109,38 +110,72 @@ def get_interaction_suggestion() -> str:
 
 @mcp.tool()
 def get_user_portrait() -> str:
-    """Get user portrait from daemon cache. Two modes available:
+    """Get user portrait from daemon cache.
 
-    - "safe" (default): Landmark line-art using only Vision coordinate points. No camera pixels used. Privacy-safe.
-    - "clear": Color pixel art from camera. More detailed but uses actual image data.
+    Returns the portrait based on user's configured mode:
+    - "safe": Landmark line-art (Vision coordinates only, no camera pixels, privacy-safe)
+    - "clear": Color pixel art (uses camera data, more detailed)
 
-    Both are cached by the daemon and updated every 30 seconds. No additional photo is taken.
+    The mode can be changed with set_portrait_mode tool.
+    Portraits are cached by daemon every 30 seconds. No additional photo is taken.
     """
+    mode = cfg.get_portrait_mode()
+
     safe_file = STATE_DIR / "portrait_landmark.txt"
     clear_file = STATE_DIR / "portrait_color.txt"
 
-    result = {}
-    try:
-        portrait = safe_file.read_text().strip()
-        if portrait:
-            result["safe"] = portrait
-    except FileNotFoundError:
-        pass
-
-    try:
-        portrait = clear_file.read_text().strip()
-        if portrait:
-            result["clear"] = portrait
-    except FileNotFoundError:
-        pass
-
-    if result:
-        return json.dumps(result, ensure_ascii=False)
+    # Return based on configured mode
+    if mode == "safe":
+        try:
+            portrait = safe_file.read_text().strip()
+            if portrait:
+                return portrait
+        except FileNotFoundError:
+            pass
+    elif mode == "clear":
+        try:
+            portrait = clear_file.read_text().strip()
+            if portrait:
+                return portrait
+        except FileNotFoundError:
+            pass
+    elif mode == "both":
+        result = {}
+        try:
+            result["safe"] = safe_file.read_text().strip()
+        except FileNotFoundError:
+            pass
+        try:
+            result["clear"] = clear_file.read_text().strip()
+        except FileNotFoundError:
+            pass
+        if result:
+            return json.dumps(result, ensure_ascii=False)
 
     return json.dumps({
         "status": "unavailable",
-        "message": "No cached portrait available. Daemon may not be running.",
+        "message": f"No cached portrait (mode={mode}). Daemon may not be running.",
     })
+
+
+@mcp.tool()
+def set_portrait_mode(mode: str) -> str:
+    """Switch portrait mode.
+
+    Modes:
+    - "safe": Privacy-safe line-art portrait. Uses only Vision framework coordinate
+      points to draw face outline. NO camera pixels stored or transmitted. Recommended
+      for privacy-conscious users.
+    - "clear": Color pixel art portrait. Uses camera image data to render a low-resolution
+      colored portrait. More detailed and recognizable. All data stays local only.
+    - "both": Cache both modes, return both when queried.
+
+    Privacy notice:
+    - Safe mode: Only facial landmark coordinates (x,y points) are used. No image data.
+    - Clear mode: Camera pixels are downsampled to ~40x10 character blocks (~400 colored cells).
+      Data is cached locally at ~/.claudeface/ and never uploaded anywhere.
+    """
+    return cfg.set_portrait_mode(mode)
 
 
 @mcp.tool()
