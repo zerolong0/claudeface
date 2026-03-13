@@ -22,7 +22,11 @@ import Vision
 
 // MARK: - ASCII Art Character Ramp
 
-let ASCII_RAMP = " .,:;i1tfLCG08@"
+// Unicode half-block characters for 2x vertical resolution pixel art
+let BLOCK_FULL  = "\u{2588}" // █ both pixels bright
+let BLOCK_UPPER = "\u{2580}" // ▀ top bright, bottom dark
+let BLOCK_LOWER = "\u{2584}" // ▄ top dark, bottom bright
+// space = both pixels dark
 
 // MARK: - Frame Capturer (shared by detect + ascii modes)
 
@@ -160,7 +164,10 @@ func detectLandmarks(from pixelBuffer: CVPixelBuffer) -> [String: Any] {
 
 // MARK: - ASCII Portrait Rendering
 
-func renderASCII(pixelBuffer: CVPixelBuffer, width: Int = 80, height: Int = 35) {
+func renderASCII(pixelBuffer: CVPixelBuffer, width: Int = 80, height: Int = 40) {
+    // Each terminal row encodes 2 pixel rows via half-block characters.
+    let pixelH = height * 2
+
     CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
@@ -174,38 +181,121 @@ func renderASCII(pixelBuffer: CVPixelBuffer, width: Int = 80, height: Int = 35) 
     }
 
     let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
-    let rampCount = ASCII_RAMP.count
 
-    // Terminal characters are ~2x taller than wide, so we sample accordingly
-    let scaleX = Double(imgWidth) / Double(width)
-    let scaleY = Double(imgHeight) / Double(height)
+    // Block size: how many source pixels map to one target cell
+    let blockW = Double(imgWidth) / Double(width)
+    let blockH = Double(imgHeight) / Double(pixelH)
 
-    var lines: [String] = []
+    // --- Step 1: Block-average sampling (reduces noise vs point sampling) ---
+    var grid = [[Double]](repeating: [Double](repeating: 0, count: width), count: pixelH)
 
-    for row in 0..<height {
-        var lineChars: [Character] = []
-        // Sample from image (top-to-bottom, but camera image is not flipped)
-        let srcY = Int(Double(row) * scaleY)
-        let clampedY = min(srcY, imgHeight - 1)
+    for row in 0..<pixelH {
+        let srcYStart = Int(Double(row) * blockH)
+        let srcYEnd = min(Int(Double(row + 1) * blockH), imgHeight)
 
         for col in 0..<width {
-            // Mirror horizontally so it looks like a mirror
-            let srcX = imgWidth - 1 - Int(Double(col) * scaleX)
-            let clampedX = max(0, min(srcX, imgWidth - 1))
+            // Mirror horizontally (selfie mirror)
+            let mirrorCol = width - 1 - col
+            let srcXStart = Int(Double(mirrorCol) * blockW)
+            let srcXEnd = min(Int(Double(mirrorCol + 1) * blockW), imgWidth)
 
-            let offset = clampedY * bytesPerRow + clampedX * 4
-            // BGRA format
-            let b = Double(buffer[offset])
-            let g = Double(buffer[offset + 1])
-            let r = Double(buffer[offset + 2])
-
-            // Luminance
-            let luma = 0.299 * r + 0.587 * g + 0.114 * b
-            let idx = min(Int(luma / 256.0 * Double(rampCount)), rampCount - 1)
-            let char = ASCII_RAMP[ASCII_RAMP.index(ASCII_RAMP.startIndex, offsetBy: idx)]
-            lineChars.append(char)
+            var sum: Double = 0
+            var count: Double = 0
+            for sy in srcYStart..<srcYEnd {
+                for sx in srcXStart..<srcXEnd {
+                    let offset = sy * bytesPerRow + sx * 4
+                    let b = Double(buffer[offset])
+                    let g = Double(buffer[offset + 1])
+                    let r = Double(buffer[offset + 2])
+                    sum += 0.299 * r + 0.587 * g + 0.114 * b
+                    count += 1
+                }
+            }
+            grid[row][col] = count > 0 ? sum / count : 0
         }
-        lines.append(String(lineChars))
+    }
+
+    // --- Step 2: Face-region contrast (use center 50% for percentile calc) ---
+    // Webcam portraits have the face in the center; using center region
+    // prevents bright backgrounds from washing out facial detail.
+    let roiY0 = pixelH / 6
+    let roiY1 = pixelH * 5 / 6
+    let roiX0 = width / 4
+    let roiX1 = width * 3 / 4
+
+    var faceValues: [Double] = []
+    for row in roiY0..<roiY1 {
+        for col in roiX0..<roiX1 {
+            faceValues.append(grid[row][col])
+        }
+    }
+    faceValues.sort()
+    let lo = faceValues[max(0, Int(Double(faceValues.count) * 0.05))]
+    let hi = faceValues[min(faceValues.count - 1, Int(Double(faceValues.count) * 0.95))]
+    let range = max(hi - lo, 1.0)
+
+    for row in 0..<pixelH {
+        for col in 0..<width {
+            // Normalize to 0-1
+            var v = max(0, min(1, (grid[row][col] - lo) / range))
+            // Single S-curve for moderate contrast boost
+            v = v * v * (3.0 - 2.0 * v)
+            grid[row][col] = v * 255.0
+        }
+    }
+
+    // --- Step 3: Local adaptive threshold for detail preservation ---
+    // Compare each pixel to its local neighborhood mean.
+    // Pixels darker than local mean → black (feature), otherwise → white (skin/bg).
+    let radius = max(width / 16, 3) // neighborhood radius
+    let bias: Double = 12.0 // sensitivity: higher = less black detail, cleaner look
+
+    // Build integral image for fast box-mean computation
+    var integral = [[Double]](repeating: [Double](repeating: 0, count: width + 1), count: pixelH + 1)
+    for row in 0..<pixelH {
+        var rowSum: Double = 0
+        for col in 0..<width {
+            rowSum += grid[row][col]
+            integral[row + 1][col + 1] = integral[row][col + 1] + rowSum
+        }
+    }
+
+    var binary = [[Double]](repeating: [Double](repeating: 0, count: width), count: pixelH)
+    for row in 0..<pixelH {
+        for col in 0..<width {
+            let y0 = max(0, row - radius)
+            let y1 = min(pixelH, row + radius + 1)
+            let x0 = max(0, col - radius)
+            let x1 = min(width, col + radius + 1)
+            let area = Double((y1 - y0) * (x1 - x0))
+            let sum = integral[y1][x1] - integral[y0][x1] - integral[y1][x0] + integral[y0][x0]
+            let localMean = sum / area
+            binary[row][col] = grid[row][col] > (localMean - bias) ? 255 : 0
+        }
+    }
+    // --- Step 4: Half-block character output ---
+    var lines: [String] = []
+
+    for termRow in 0..<height {
+        let topRow = termRow * 2
+        let botRow = topRow + 1
+        var line = ""
+
+        for col in 0..<width {
+            let top = binary[topRow][col] > 127
+            let bot = botRow < pixelH ? binary[botRow][col] > 127 : false
+
+            if top && bot {
+                line += BLOCK_FULL
+            } else if top {
+                line += BLOCK_UPPER
+            } else if bot {
+                line += BLOCK_LOWER
+            } else {
+                line += " "
+            }
+        }
+        lines.append(line)
     }
 
     print(lines.joined(separator: "\n"))
