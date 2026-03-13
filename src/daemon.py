@@ -19,10 +19,12 @@ from emotion import LandmarkEmotionDetector
 
 STATE_DIR = Path.home() / ".claudeface"
 STATE_FILE = STATE_DIR / "state.json"
+MINI_PORTRAIT_FILE = STATE_DIR / "mini_portrait.txt"
 PID_FILE = STATE_DIR / "daemon.pid"
 VISION_BINARY = _PROJECT_ROOT / "bin" / "claudeface-vision"
 DEFAULT_INTERVAL = 10  # seconds
 DEFAULT_IDLE_TIMEOUT = 7200  # 2 hours
+MINI_PORTRAIT_INTERVAL = 30  # refresh mini portrait every 30s
 
 
 def _write_state(data: dict) -> None:
@@ -78,6 +80,23 @@ def _call_vision_binary() -> dict | None:
         return None
 
 
+def _update_mini_portrait() -> None:
+    """Capture a mini ASCII portrait and cache it to file."""
+    if not VISION_BINARY.exists():
+        return
+    try:
+        result = subprocess.run(
+            [str(VISION_BINARY), "--ascii-mini", "15", "7"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tmp = MINI_PORTRAIT_FILE.with_suffix(".tmp")
+            tmp.write_text(result.stdout.strip())
+            tmp.replace(MINI_PORTRAIT_FILE)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 # ------------------------------------------------------------------
 # Main daemon loop
 # ------------------------------------------------------------------
@@ -88,6 +107,7 @@ def run_daemon(interval: float = DEFAULT_INTERVAL,
 
     detector = LandmarkEmotionDetector()
     start_time = time.time()
+    last_mini_update = 0.0
     running = True
 
     def _shutdown(signum, _frame):
@@ -185,6 +205,13 @@ def run_daemon(interval: float = DEFAULT_INTERVAL,
                 }
 
             _write_state(state)
+
+            # Refresh mini portrait periodically
+            now = time.time()
+            if now - last_mini_update >= MINI_PORTRAIT_INTERVAL:
+                _update_mini_portrait()
+                last_mini_update = now
+
             time.sleep(interval)
 
     finally:

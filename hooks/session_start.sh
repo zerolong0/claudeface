@@ -28,10 +28,10 @@ DETECT_JSON=$("$VISION_BINARY" 2>/dev/null || echo '{"status":"error"}')
 DETECT_STATUS=$(echo "$DETECT_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
 
 if [ "$DETECT_STATUS" = "ok" ]; then
-  # Render ASCII portrait
-  "$VISION_BINARY" --ascii 80 25 2>/dev/null
+  # Render colored pixel art portrait directly to terminal (bypasses Claude context capture)
+  "$VISION_BINARY" --pixel 40 10 > /dev/tty 2>/dev/null || true
 
-  # Show emotion below portrait
+  # Show emotion as compact one-liner (this goes to Claude context, intentionally small)
   "$PYTHON" -c "
 import sys, json
 sys.path.insert(0, '$PLUGIN_DIR/src')
@@ -44,9 +44,8 @@ if r:
     emojis = {'happy': ':)', 'sad': ':(', 'angry': '>:(', 'surprise': ':O', 'neutral': ':|'}
     e = r['emotion']
     emoji = emojis.get(e, '')
-    conf = r['confidence']
     summary = d.get_emotion_summary(r['all_emotions'])
-    print(f'  ClaudeFace {emoji} {summary}')
+    print(f'ClaudeFace {emoji} {summary}')
 " 2>/dev/null || true
 elif [ "$DETECT_STATUS" = "no_face" ]; then
   echo "  [ClaudeFace] Camera active, no face detected" >&2

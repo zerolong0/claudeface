@@ -107,6 +107,38 @@ def get_interaction_suggestion() -> str:
 
 
 @mcp.tool()
+def get_user_portrait() -> str:
+    """Get a colored pixel art portrait of the user captured via webcam.
+
+    Returns ANSI 24-bit true color pixel art using Unicode half-block characters.
+    The portrait uses face detection to crop and center on the user's face.
+    """
+    import subprocess
+
+    if not VISION_BINARY.exists():
+        return json.dumps({
+            "status": "error",
+            "message": "Vision binary not found. Run setup.sh to compile.",
+        })
+
+    try:
+        result = subprocess.run(
+            [str(VISION_BINARY), "--pixel", "40", "10"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return json.dumps({
+                "status": "error",
+                "message": result.stderr.strip() or "Failed to capture portrait.",
+            })
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        return json.dumps({"status": "error", "message": "Portrait capture timed out."})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
 def get_daemon_status() -> str:
     """Check the health of the ClaudeFace daemon process.
 

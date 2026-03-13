@@ -163,6 +163,25 @@
       "status": "complete",
       "agent": "",
       "notes": "Strategies should be subtle, not patronizing. Key patterns: happy→positive, sad→supportive, angry→calm, surprise→curious, neutral→normal, fatigue(trend)→rest suggestion."
+    },
+    {
+      "id": "F9",
+      "name": "Colored Pixel Art Portrait Renderer",
+      "category": "functional",
+      "description": "Add --pixel mode to claudeface-vision Swift binary: face-crop via Vision bbox, block-average downsample with RGB channels, color quantization (6 levels/channel), ANSI 24-bit true color output using Unicode half-block characters. Stylized pixel art aesthetic like Claude Code's orange pixel avatar.",
+      "steps": [
+        "Step 1: Add RGB struct and renderPixelArt function to claudeface_vision.swift (face-crop + downsample + quantize + ANSI render)",
+        "Step 2: Add --pixel [W] [H] CLI argument parsing in main section",
+        "Step 3: Compile and test with camera - verify colored pixel portrait output",
+        "Step 4: Update hooks/session_start.sh to use --pixel instead of --ascii",
+        "Step 5: Restore get_user_portrait MCP tool in mcp_server.py calling --pixel mode"
+      ],
+      "successCriteria": "bin/claudeface-vision --pixel 48 24 outputs a recognizable colored pixel art portrait of the user's face in the terminal using ANSI true color",
+      "dependencies": ["F2", "F4"],
+      "techDocs": ["AVFoundation CVPixelBuffer", "Vision VNDetectFaceLandmarksRequest", "ANSI 24-bit true color"],
+      "status": "pending",
+      "agent": "",
+      "notes": "Core algorithm: Vision bbox → face crop with 30% padding → block-average downsample to pixel resolution → uniform quantize 6 levels/channel → ANSI 38;2;R;G;Bm fg + 48;2;R;G;Bm bg + ▀ half-block"
     }
   ]
 }
