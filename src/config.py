@@ -7,7 +7,7 @@ CONFIG_DIR = Path.home() / ".claudeface"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULTS = {
-    "portrait_mode": "clear",  # "safe" | "clear" | "both"
+    "portrait_mode": "safe",  # "safe" | "clear" | "both"
 }
 
 

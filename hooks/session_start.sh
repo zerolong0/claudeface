@@ -26,11 +26,11 @@ fi
 CONFIG_FILE="$STATE_DIR/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
   mkdir -p "$STATE_DIR"
-  echo '{"portrait_mode": "clear"}' > "$CONFIG_FILE"
-  echo "[ClaudeFace] Portrait mode: clear (color pixel art)" >&2
-  echo "  Switch anytime: ask Claude to 'set portrait mode to safe'" >&2
-  echo "  safe = privacy-first line-art (no camera pixels)" >&2
-  echo "  clear = color portrait (local only, never uploaded)" >&2
+  echo '{"portrait_mode": "safe"}' > "$CONFIG_FILE"
+  echo "[ClaudeFace] Portrait mode: safe (privacy-first line-art)" >&2
+  echo "  Try color version: ask Claude to 'set portrait mode to clear'" >&2
+  echo "  safe = line-art from Vision coordinates (no camera pixels)" >&2
+  echo "  clear = color pixel art (local only, never uploaded)" >&2
 fi
 
 # --- Emotion Detection (Vision framework only, no portrait rendering) ---
